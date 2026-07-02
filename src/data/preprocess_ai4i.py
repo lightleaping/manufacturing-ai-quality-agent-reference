@@ -57,31 +57,64 @@ def validate_ai4i_columns(df: pd.DataFrame) -> None:
 
 def encode_type_column(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Type 컬럼을 문자열에서 숫자로 변환합니다.
-
     encode: 정보를 특정 형식으로 변환하거나 암호화한다.
 
-    예:
+    AI4I 데이터의 Type 컬럼을 문자열 범주형 값에서 숫자 값으로 변환합니다.
+
+    AI4I 원본 데이터에서 Type 컬럼은 제품 품질 등급을 의미하며,
+    일반적으로 다음 세 가지 값을 가집니다.
+
+    L = Low
+    M = Medium
+    H = High
+
+    PyTorch 모델은 문자열을 직접 입력으로 받을 수 없기 때문에
+    L, M, H를 숫자로 변환합니다.
+
+    현재 baseline mapping:
+
     L -> 0
     M -> 1
     H -> 2
 
-    Type 컬럼은 원본 CSV에 따라 공백이 섞여 있을 수 있으므로,
-    먼저 문자열로 변환한 뒤 앞뒤 공백을 제거하고 대문자로 통일합니다.
+    주의:
+    Product ID는 예를 들어 "L47181", "M14860"처럼 생겼을 수 있습니다.
+    하지만 Product ID와 Type은 다른 컬럼입니다.
+
+    정상적인 Type 값:
+    L, M, H
+
+    잘못 들어간 Type 값 예:
+    L47181, M14860, H29424
+
+    따라서 이 함수는 Product ID를 변환하는 함수가 아니라,
+    Type 컬럼이 진짜 L/M/H 값인지 확인한 뒤 encoding하는 함수입니다.
+
+    단, 단순 숫자 mapping은 모델이 M, M, H 사이에
+    순서 관계가 있다고 오해할 수 있습니다.
+
+    예를 들어 모델 입장에서는 다음처럼 해석될 여지가 있습니다.
+
+    L(0) < M(1) < H(2)
+
+    따라서 최종 프로젝트에서는 one-hot encoding으로 개선할 수 있습니다.
     """
 
     # 원본 DataFrame을 직접 수정하지 않기 위해 copy를 만듭니다.
     # 이렇게 하면 함수 밖의 원본 데이터가 의도치 않게 바뀌지 않습니다.
     df = df.copy()
 
-    # # Type 컬럼의 L, M, H 값을 숫자로 변환합니다.
-    # df["Type"] = df["Type"].map(AI4I_TYPE_MAPPING)
+    # Type 컬럼이 없으면 이후 처리를 할 수 없으므로 명확히 오류를 냅니다.
+    if "Type" not in df.columns:
+        raise ValueError("Type 컬럼이 없습니다.")
 
     # Type 컬럼 값을 문자열로 변환합니다.
-    # 혹시 숫자나 다른 타입으로 들어온 값이 있어도 문자열 처리 기준을 통일하기 위함입니다.
+    # 혹시 숫자나 다른 타입으로 들어온 값이 있어도
+    # 문자열 처리 기준(문자열 메서드 사용)을 통일하기 위함입니다.
+    # 예를 들어, 이후 str.strip(), str.upper() 같은 문자열 메서드를 안전하세 쓰기 위해서입니다.
     df["Type"] = df["Type"].astype(str)
 
-    # Type 컬럼의 앞뒤 공백을 제거하고 대문자로 통일합니다.
+    # Type 컬럼의 값의 앞뒤 공백을 제거하고 대문자로 통일합니다.
     #
     # 예:
     # " L" -> "L"
@@ -90,6 +123,41 @@ def encode_type_column(df: pd.DataFrame) -> pd.DataFrame:
     # 이렇게 해두면 원본 데이터에 사소한 공백이나 소문자가 있어도
     # mapping이 안정적으로 동작합니다.
     df["Type"] = df["Type"].str.strip().str.upper()
+
+    # mapping 전에 현재 Type 컬럼의 실제 고유값을 확인합니다.
+    # 이 값들이 L, M, H 안에 들어 있어야 정상입니다.
+    #
+    # unique()는 Type 컬럼에 어떤 값들이 들어 있는지 중복 없이 반환합니다.
+    #
+    # 주의:
+    # unique는 메서드이므로 반드시 괄호를 붙여 unique()로 호출해야 합니다.
+    #
+    # 잘못된 예:
+    # df["Type"].unique
+    # → 메서드 객체 자체를 가리킬 뿐, 실제 고유값 목록을 반환하지 않습니다.
+    #
+    # 올바른 예:
+    # df["Type"].unique()
+    # → 예: ["L", "M", "H"]
+    #
+    # set(...)으로 감싸는 이유는
+    # 이후 allowed_values와 차집합 연산을 하기 위해서입니다.
+    actual_values = set(df["Type"].unique())
+
+    # 허용 가능한 Type 값입니다.
+    allowed_values = set(AI4I_TYPE_MAPPING.keys())
+
+    # 실제 값 중 허용되지 않는 값을 찾습니다.
+    # 예: {"L47181", "M14860"} 같은 값이 있으면 invalid_valus에 들어갑니다.
+    invalid_values = actual_values - allowed_values
+
+    # 허용되지 않는 Type 값이 있다면,
+    # 어떤 값 때문에 실패했는지 보여주면서 오류를 발생시킵니다.
+    if invalid_values:
+        raise ValueError(
+            "Type 컬럼에 L, M, H 외의 알 수 없는 값이 포함되어 있습니다. "
+            f"알 수 없는 값: {sorted(invalid_values)}"
+        )
 
     # Type 컬럼의 L, M, H 값을 숫자로 변환합니다.
     #
@@ -100,15 +168,24 @@ def encode_type_column(df: pd.DataFrame) -> pd.DataFrame:
     #     "H": 2,
     # }
     #
+    # 중요한 점:
+    # map()은 변환 결과를 새 Series로 반환할 뿐,
+    # 자동으로 df["Type"]을 바꿔주지 않습니다.
+    #
+    # 따라서 반드시 df["Type"] = ... 형태로 다시 저장해야 합니다.
+    df["Type"] = df["Type"].map(AI4I_TYPE_MAPPING)
+
     # map()은 mapping에 없는 값을 만나면 NaN으로 바꿉니다.
     # 예를 들어 Type에 "UNKNOWN"이 있으면 숫자로 바꿀 수 없습니다.
-    if df["Type"].isna().any():
-        raise ValueError(
-            "Type 컬럼에 L, M, H 외의 알 수 없는 값이 포함되어 있습니다."
-            "df['Type'].unique()로 실제 값을 확인하세요."
-        )
-
-
+    #
+    # NaN이 있다는 것은 현재 정의한 AI4I_TYPE_MAPPING 기준으로
+    # 처리할 수 없는 값이 있다는 뜻이므로 명확하게 오류를 발생시킵니다.
+    # if df["Type"].isna().any():
+    #     raise ValueError(
+    #         "Type 컬럼에 L, M, H 외의 알 수 없는 값이 포함되어 있습니다."
+    #         "df['Type'].unique()로 실제 값을 확인하세요."
+    #     )
+    # 해당 코드는 mapping 후에 이루어지며, 따라서 NaN으로 모두 변환된 후이기에 디버깅하기 어렵다.
 
     # 변환된 DataFrmae을 반환합니다.
     return df

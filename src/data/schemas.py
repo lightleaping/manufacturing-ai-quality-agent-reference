@@ -57,6 +57,6 @@ AI4I_FAILURE_TYPE_COLUMNS = [
 # 최종 프로젝트에서는 one-hot encoding으로 개선할 수 있습니다.
 AI4I_TYPE_MAPPING = {
     "L": 0,
-    "m": 1,
+    "M": 1,
     "H": 2,
 }
