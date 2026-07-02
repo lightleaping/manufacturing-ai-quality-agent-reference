@@ -181,11 +181,32 @@ def test_failure_mlp_bce_with_logits_loss():
     FailureMLP의 logit 출력과 binary target을 이용해
     BCEWithLogitsLoss가 정상적으로 계산되는지 확인합니다.
 
+    Binary Cross Entropy는 이진 분류에서 사용하는 대표적인 손실함수입니다.
+
+    이 프로젝트의 정답 label은 다음과 같습니다.
+
+    0 = 정상
+    1 = 고장
+
+    모델은 각 샘플에 대해 고장일 가능성을 점수로 출력합니다.
+
+    단, 현재 FailureMLP는 마지막에 Sigmoid를 포함하지 않기 때문에
+    모델 출력은 probability가 아니라 logit입니다.
+
+    BCEWithLogitsLoss는 logit을 직접 입력 받고,
+    내부에서 sigmoid 변환과 binary cross entropy 계산을 함께 수행합니다.
+
+    즉, 아래 두 단계를 하나로 합친 loss입니다.
+
+    1. logits -> sigmoid -> probabilities
+    2. probabilities와 y를 비교해 binary cross entropy 계산
+
     이 테스트는 아직 모델 성능을 검증하는 것이 아니라,
     학습에 필요한 loss 계산 흐름이 정상적으로 연결되는지 확인하는 테스트입니다.
     """
 
     # 모델을 생성합니다.
+    # input_dim=6은 AI4I 데이터에서 사용하는 feature 개수입니다.
     model = FailureMLP(input_dim=6)
 
     # 이진 분류에서 사용할 손실함수입니다.
@@ -194,6 +215,11 @@ def test_failure_mlp_bce_with_logits_loss():
     criterion = torch.nn.BCEWithLogitsLoss()
 
     # batch_size가 5인 가짜 입력 데이터를 만듭니다.
+    #
+    # shape = [5, 6]
+    #
+    # 5 = 샘플 개수
+    # 6 = 각 샘플의 feature 개수
     x = torch.randn(5, 6)
 
     # 각 샘플의 정답 label을 만듭니다.
@@ -201,12 +227,22 @@ def test_failure_mlp_bce_with_logits_loss():
     #
     # 0.0 = 정상
     # 1.0 = 고장
+    #
+    # dtype=torch.float32를 사용하는 이유:
+    # BCEWithLogitsLoss는 정답 label도 float Tensor로 받습니다.
+    # 즉, 0과 1이지만 정수 int가 아니라 0.0, 1.0 형태로 받습니다.
     y = torch.tensor(
         [[0.0], [1.0], [0.0], [1.0], [0.0],
          dtype=torch.float32,
     )
 
+    # 모델에 입력 x를 넣어 logit을 계산합니다.
+    #
+    # logits는 아직 확률이 아닙니다.
+    # 값이 음수일 수도 있고, 1보다 클 수도 있습니다.
     # 모델 출력은 logit입니다.
+    #
+    # shape = [5, 1]
     logits = model(x)
 
     # logit과 정답 y를 비교해 loss를 계산합니다.
@@ -230,6 +266,14 @@ def test_failure_mlp_bce_with_logits_loss():
     # - 비교 결과로 loss를 계산합니다.
     # - loss가 작을수록 모델 예측이 정답에 가깝다는 뜻입니다.
     # - loss가 클수록 모델 예측이 정답과 많이 다르다는 뜻입니다.
+
+    # BCEWithLogitsLoss는 logits와 정답 y를 비교해 loss를 계산합니다.
+    # 내부적으로는 다음 흐름을 수행한다고 이해하면 됩니다.
+    #
+    # 1. logits에 sigmoid 적용
+    # 2. sigmoid 결과를 고장 확률 probability로 해석
+    # 3. probability와 실제 정답 y를 비교
+    # 4. binary cross entropy loss 계산
     loss = criterion(logits, y)
 
     # loss는 Tensor 하나로 계산되어야 합니다.
@@ -253,8 +297,16 @@ def test_failure_mlp_bce_with_logits_loss():
     # 그래서 이 테스트는
     # "loss가 학습에 사용할 수 있는 단일 스칼라 값으로 계산되었는가?"
     # 를 확인합니다.
+    # loss.ndm == 0은 loss가 하나의 스칼라 값인지 확인하는 테스트입니다.
+    #
+    # 여러 샘플의 loss를 평균내면 최종 loss는 숫자 하나가 됩니다.
+    #
+    # 예:
+    # tensor(0.6932)
     assert loss.ndim == 0
 
+    # Binary cross entropy loss는 0 이상입니다.
+    #
     # loss는 음수가 아니어야 합니다.
     # loss.item()은 Tensor 안에 들어 있는 숫자 값을
     # Python 숫자로 꺼내는 코드입니다.
