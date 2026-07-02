@@ -75,6 +75,27 @@ def test_failure_mlp_logits_can_be_converted_to_probability():
     # model(x) 형태로 호출하는 것이 표준입니다.
     #
     # 모델 출력은 logit입니다.
+    
+    # inference는 학습된 모델을 실제 입력 데이터에 적용해
+    # 결과를 계산하는 전체 추론 과정입니다.
+    #
+    # 이 프로젝트의 inference 흐름은 다음과 같습니다.
+    #
+    # 1. model(x)
+    #     -> 모델이 입력 x를 받아 logit을 출력합니다.
+    #
+    # 2, torch.sigmoid(logits)
+    #     -> logit을 0과 1 사이의 probability로 변환합니다.
+    #
+    # 3. probabilities >= threshold
+    #     -> probability를 기준값(threshold)과 비교합니다.
+    # 4. prediction
+    #     -> 최종 예측 label를 만듭니다.
+    #         0 = 정상
+    #         1 = 고장
+    #
+    # 따라서 inference는 전체 과정이고,
+    # prediction은 그 과정의 최종 결과라고 볼 수 있습니다.
     logits = model(x)
 
     # logit은 확률이 아니므로 0~1 범위라고 보장할 수 없습니다.
