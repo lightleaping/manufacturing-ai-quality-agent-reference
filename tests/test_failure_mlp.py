@@ -173,5 +173,91 @@ def test_failure_mlp_bce_with_logits_loss():
     criterion = torch.nn.BCEWithLogitsLoss()
 
     # batch_size가 5인 가짜 입력 데이터를 만듭니다.
-    # ------------------
+    x = torch.randn(5, 6)
 
+    # 각 샘플의 정답 label을 만듭니다.
+    # shape은 모델 출력과 맞추기 위해 [batch_size, 1]로 둡니다.
+    #
+    # 0.0 = 정상
+    # 1.0 = 고장
+    y = torch.tensor(
+        [[0.0], [1.0], [0.0], [1.0], [0.0],
+         dtype=torch.float32,
+    )
+
+    # 모델 출력은 logit입니다.
+    logits = model(x)
+
+    # logit과 정답 y를 비교해 loss를 계산합니다.
+    # criterion은 loss function입니다.
+    # 예: nn.CrossEntropyLoss(), nn.BCEWithLogitsLoss(), nn.MSELoss() 등
+    #
+    # loss function은 모델의 예측값과 실제 정답을 비교해서
+    # "모델이 얼마나 틀렸는지"를 하나의 숫자로 계산합니다.
+    #
+    # logits:
+    # - 모델이 출력한 예측값입니다.
+    # - 아직 확률로 변환되지 않은 원본 점수입니다.
+    # - 예를 들어 이진 분류라면 "고장일 가능성이 높은지"를 나타내는 점수일 수 있습니다.
+    #
+    # y:
+    # - 실제 정답 label입니다.
+    # - 예를 들어 정상=0, 고장=1 같은 값입니다.
+    #
+    # criterion(logits, y):
+    # - 모델 예측값 logits와 실제 정답 y를 비교합니다.
+    # - 비교 결과로 loss를 계산합니다.
+    # - loss가 작을수록 모델 예측이 정답에 가깝다는 뜻입니다.
+    # - loss가 클수록 모델 예측이 정답과 많이 다르다는 뜻입니다.
+    loss = criterion(logits, y)
+
+    # loss는 Tensor 하나로 계산되어야 합니다.
+    # loss.ndim은 loss Tensor의 차원 수를 의미합니다.
+    #
+    # loss.ndim == 0 이라는 것은
+    # loss가 벡터나 행렬이 아니라 "숫자 하나"라는 뜻입니다.
+    #
+    # 예:
+    # torch.tensor(0.53)
+    # → 차원 수 0
+    # → 스칼라 Tensor
+    #
+    # 반면 아래처럼 샘플별 loss가 여러 개 남아 있으면 ndim이 1입니다.
+    # torch.tensor([0.3, 0.7, 0.2])
+    # → 차원 수 1
+    #
+    # 일반적인 학습에서는 optimizer가 역전파할 수 있도록
+    # batch 전체의 loss가 평균 또는 합계로 줄어든 숫자 하나여야 합니다.
+    #
+    # 그래서 이 테스트는
+    # "loss가 학습에 사용할 수 있는 단일 스칼라 값으로 계산되었는가?"
+    # 를 확인합니다.
+    assert loss.ndim == 0
+
+    # loss는 음수가 아니어야 합니다.
+    # loss.item()은 Tensor 안에 들어 있는 숫자 값을
+    # Python 숫자로 꺼내는 코드입니다.
+    #
+    # 예:
+    # loss = torch.tensor(0.53)
+    # loss.item()
+    # → 0.53
+    #
+    # 대부분의 loss function은
+    # 예측값과 정답의 차이, 또는 틀린 정도를 계산하기 때문에
+    # 값이 0 이상이어야 합니다.
+    #
+    # loss가 0에 가까움:
+    # - 예측이 정답에 매우 가까움
+    #
+    # loss가 큼:
+    # - 예측이 정답과 많이 다름
+    #
+    # loss가 음수:
+    # - 일반적인 분류/회귀 loss에서는 이상한 상황
+    # - loss function 선택, 입력값 형태, target 형식 등에 문제가 있을 수 있음
+    #
+    # 그래서 이 테스트는
+    # "loss가 정상적인 범위의 값으로 계산되었는가?"
+    # 를 확인합니다.
+    assert loss.item() >= 0
