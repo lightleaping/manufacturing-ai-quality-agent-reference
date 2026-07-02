@@ -98,12 +98,28 @@ class FailureMLP(nn.Module):
             # 이렇게 Sigmoid를 통과하기 전의 원시 점수를 logit이라고 합니다.
             # 즉, logit은 "확률로 변환되기 전의 모델 점수"입니다.
             #
-            # 이 프로젝트에서는 학습 시 BCEWithLogitsLoss를 사용할 예정입니다.
-            # BCEWithLogitsLoss는 내부에서 Sigmoid 계산까지 함께 처리하므로,
-            # 모델 마지막에 nn.Sigmoid()를 넣지 않는 것이 일반적입니다.
+            # 이 프로젝트는 이진 분류 문제입니다.
             #
-            # 나중에 추론 단계에서 사람이 해석할 확률이 필요할 때만
-            # torch.sigmoid(logits)를 적용해 0~1 사이 probability로 변환합니다.
+            # 0 = 정상
+            # 1 = 고장
+            #
+            # 따라서 최종적으로는 각 샘플마다
+            # "고장일 가능성"을 나타내는 값 하나가 필요합니다.
+            #
+            # 하지만 여기서 출력되는 값은 아직 probability가 아니라 logit입니다.
+            #
+            # logit은 sigmoid를 통과하기 전의 원시 점수입니다.
+            # Linear layer 출력이므로 음수일 수도 있고, 1보다 클 수도 있습니다.
+            #
+            # 학습 단계에서는 이 logit을 BCEWithLogitsLoss에 그대로 넣습니다.
+            #
+            # BCEWithLogitsLoss는 내부에서
+            # sigmoid 변환과 binary cross entropy 계산을 함께 수행합니다.
+            #
+            # 그래서 모델 마지막에 nn.Sigmoid()를 넣지 않습니다.
+            #
+            # 추론 단계에서 사람이 해석할 확률이 필요할 때만
+            # torch.sigmoid(logits)를 적용합니다.
             nn.Linear(hidden_dim // 2, 1),
 
             # Sigmoid는 logit을 0과 1 사이의 값으로 변환합니다.
