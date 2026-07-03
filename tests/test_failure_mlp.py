@@ -100,7 +100,7 @@ def test_failure_mlp_logits_can_be_converted_to_probability():
 
     # logit은 확률이 아니므로 0~1 범위라고 보장할 수 없습니다.
     # 사람이 해석 가능한 고장 확률이 필요할 때 sigmoid를 적용합니다.
-    probabilites = torch.sigmoid(logits)
+    probabilities = torch.sigmoid(logits)
 
     # probability >= 0은 probability Tensor의 모든 값에 대해
     # "각 값이 0 이상인가?"를 비교합니다.
@@ -136,7 +136,7 @@ def test_failure_mlp_logits_can_be_converted_to_probability():
     # 0과 1 사이의 값으로 변환하기 때문에,
     # 모델의 마지막 layer가 Sigmoid라면 이 테스트는 통과해야 합니다.
 
-    assert torch.all(probabilites >= 0)
+    assert torch.all(probabilities >= 0)
 
     # sigmoid를 통과한 probability는 1 이하이어야 합니다.
     assert torch.all(probabilities <= 1)
@@ -232,7 +232,7 @@ def test_failure_mlp_bce_with_logits_loss():
     # BCEWithLogitsLoss는 정답 label도 float Tensor로 받습니다.
     # 즉, 0과 1이지만 정수 int가 아니라 0.0, 1.0 형태로 받습니다.
     y = torch.tensor(
-        [[0.0], [1.0], [0.0], [1.0], [0.0],
+        [[0.0], [1.0], [0.0], [1.0], [0.0]],
          dtype=torch.float32,
     )
 
