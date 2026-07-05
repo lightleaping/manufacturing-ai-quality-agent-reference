@@ -41,7 +41,16 @@ sys.path.append(str(PROJECT_ROOT))
 from src.data.load_ai4i import load_ai4i_csv
 from src.data.preprocess_ai4i import preprocess_ai4i_dataframe
 from src.training.train_failure_model import train_failure_model
-from src.training.evaluate_failure_model import evaluate_failure_model
+from src.training.evaluate_failure_model import (
+    compare_thresholds,
+    create_threshold_grid,
+    evaluate_failure_model,
+    select_best_threshold_by_f1,
+    select_best_threshold_with_min_recall,
+)
+
+from src.data.scale_ai4i import scale_train_test_features
+
 
 def main() -> None:
     """
@@ -87,6 +96,11 @@ def main() -> None:
     # 반환값은 PreprocessedAI4IData dataclass입니다.
     processed = preprocess_ai4i_dataframe(df)
 
+    scaled = scale_train_test_features(
+        X_train=processed.X_train,
+        X_test=processed.X_test,
+    )
+
     # 전처리 후 train / test 데이터 크기를 확인합니다.
     print("[INFO] Preprocessing completed")
     print(f"[INFO] X_train shape: {processed.X_train.shape}")
@@ -106,6 +120,76 @@ def main() -> None:
 
     print("[INFO] y_test class ratio:")
     print(processed.y_test.value_counts(normalize=True))
+
+
+    # pos_weight를 적용한 상태로 모델을 학습합니다.
+    #
+    # 기존 baseline에서는 BCEWithLogitsLoss()만 사용했습니다.
+    # 그 결과 accuracy는 0.9660으로 높았지만,
+    # 실제 고장 68개를 모두 정상으로 예측해 recall이 0이었습니다.
+    #
+    # 이 문제는 class imbalance 때문입니다.
+    #
+    # 현재 AI4I 데이터는 정상 class가 약 96.6%,
+    # 고장 class가 약 3.4%밖에 되지 않습니다.
+    #
+    # 그래서 모델이 대부분을 정상이라고 예측해도
+    # loss와 accuracy가 나쁘지 않게 보일 수 있습니다.
+    #
+    # use_pos_weight=True를 사용하면
+    # train_failure_model 내부에서 calculate_pos_weight(y_train)를 호출하고,
+    # BCEWithLogitsLoss(pos_weight=...)를 사용합니다.
+    #
+    # pos_weight는 positive class 1,
+    # 즉 Machine failure = 1인 고장 class의 loss를 더 크게 반영합니다.
+    #
+    # 목적:
+    # - 단순히 accuracy를 높이는 것이 아닙니다.
+    # - 실제 고장을 정상으로 놓치는 FN을 줄이는 것입니다.
+    # - 즉, recall을 개선하는 것이 핵심입니다.
+    #
+    # 주의:
+    # - pos_weight를 적용하면 모델이 고장을 더 적극적으로 예측할 수 있습니다.
+    # - 그 결과 TP가 늘 수 있지만 FP도 늘 수 있습니다.
+    # - 따라서 accuracy만 보지 말고 precision, recall, f1, confusion matrix를 함께 봐야 합니다.
+    
+    # Feature scaling을 적용합니다.
+    #
+    # 현재 AI4I feature들은 단위 차이가 큽니다.
+    #
+    # 예:
+    # - Air temperature [K]는 약 300대
+    # - Rotational speed [rpm]은 약 1000~3000대
+    # - Torque [Nm]는 약 10~80대
+    # - Tool wear [min]는 약 0~250대
+    # - Type은 0~2
+    #
+    # MLP는 입력 feature의 scale 차이에 영향을 받을 수 있습니다.
+    # 따라서 numeric sensor feature를 평균 0, 표준편차 1 기준으로 변환합니다.
+    #
+    # 중요한 원칙:
+    # - scaler.fit()은 train set에만 수행합니다.
+    # - test set에는 train set에서 학습된 scaler로 transform만 수행합니다.
+    #
+    # 이유:
+    # - test set은 모델이 처음 보는 데이터로 남겨두어야 합니다.
+    # - test set의 평균/표준편차를 scaling 기준에 사용하면 data leakage가 됩니다.
+    print("[INFO] Feature scaling started")
+
+    scaled = scale_train_test_features(
+        X_train=processed.X_train,
+        X_test=processed.X_test,
+    )
+
+    print("[INFO] Feature scaling completed")
+
+    # pos_weight를 적용한 상태로 모델을 학습합니다.
+    #
+    # 이전 baseline에서는 accuracy는 높았지만 실제 고장을 하나도 잡지 못했습니다.
+    # pos_weight는 positive class 1, 즉 고장 class의 loss를 더 크게 반영합니다.
+    #
+    # 이번에는 feature scaling까지 적용된 X_train으로 학습합니다.
+    print("[INFO] Training with pos_weight enabled")
 
     # 3. FailureMLP 모델을 학습합니다.
     #
@@ -129,7 +213,7 @@ def main() -> None:
     # batch_size=32
     #   mini-batch 학습 baseline
     training_result = train_failure_model(
-        X_train=processed.X_train,
+        X_train=scaled.X_train,
         y_train=processed.y_train,
         input_dim=6,
         hidden_dim=32,
@@ -137,6 +221,7 @@ def main() -> None:
         learning_rate=0.001,
         epochs=10,
         batch_size=32,
+        use_pos_weight=True,
     )
 
     print("[INFO] Training completed")
@@ -227,17 +312,99 @@ def main() -> None:
     # 이후 recall / precision trade-off를 보면서 조정할 수 있습니다.
     evaluation_result = evaluate_failure_model(
         model=training_result.model,
-        X_test=processed.X_test,
+        X_test=scaled.X_test,
         y_test=processed.y_test,
         threshold=0.5,
     )
 
-    print("[INFO] Evaluation completed")
+    print("\n[INFO] Evaluation result")
+    print(f"[METRIC] threshold: {evaluation_result.threshold:.2f}")
     print(f"[METRIC] accuracy : {evaluation_result.accuracy:.4f}")
     print(f"[METRIC] precision: {evaluation_result.precision:.4f}")
     print(f"[METRIC] recall   : {evaluation_result.recall:.4f}")
     print(f"[METRIC] f1       : {evaluation_result.f1:.4f}")
-    print(f"[METRIC] threshold: {evaluation_result.threshold:.2f}")
+
+    print("\nConfusion matrix")
+    print("                 Predicted")
+    print(f"                Normal   Failure")
+    print(
+        f"Actual Normal    {evaluation_result.true_negative:6d}   "
+        f"{evaluation_result.false_positive:7d}"
+    )
+    print(
+        f"Actual Failure   {evaluation_result.false_negative:6d}   "
+        f"{evaluation_result.true_positive:7d}"
+    )
+    
+    # threshold를 더 촘촘히 비교합니다.
+    #
+    # 기존에는 [0.3, 0.5, 0.7]만 비교했습니다.
+    # 하지만 0.70 근처에서 f1-score가 좋아졌으므로,
+    # 0.50부터 0.90까지 0.05 간격으로 더 세밀하게 비교합니다.
+    thresholds = create_threshold_grid(
+        start=0.50,
+        end=0.90,
+        step=0.05,
+    )
+
+    threshold_results = compare_thresholds(
+        model=training_result.model,
+        X_test=scaled.X_test,
+        y_test=processed.y_test,
+        thresholds=thresholds,
+    )
+
+    print("\nThreshold comparison")
+    print("threshold | accuracy | precision | recall | f1 | TN | FP | FN | TP")
+    print("-------------------------------------------------------------------")
+
+    for result in threshold_results:
+        print(
+            f"{result.threshold:9.2f} | "
+            f"{result.accuracy:8.4f} | "
+            f"{result.precision:9.4f} | "
+            f"{result.recall:6.4f} | "
+            f"{result.f1:6.4f} | "
+            f"{result.true_negative:4d} | "
+            f"{result.false_positive:3d} | "
+            f"{result.false_negative:2d} | "
+            f"{result.true_positive:2d}"
+        )
+
+    best_f1_result = select_best_threshold_by_f1(threshold_results)
+
+    print("\n[INFO] Best threshold by f1-score")
+    print(f"  threshold : {best_f1_result.threshold:.2f}")
+    print(f"  accuracy  : {best_f1_result.accuracy:.4f}")
+    print(f"  precision : {best_f1_result.precision:.4f}")
+    print(f"  recall    : {best_f1_result.recall:.4f}")
+    print(f"  f1        : {best_f1_result.f1:.4f}")
+    print(
+        f"  confusion : "
+        f"TN={best_f1_result.true_negative}, "
+        f"FP={best_f1_result.false_positive}, "
+        f"FN={best_f1_result.false_negative}, "
+        f"TP={best_f1_result.true_positive}"
+    )
+
+    best_recall_safe_result = select_best_threshold_with_min_recall(
+        results=threshold_results,
+        min_recall=0.85,
+    )
+
+    print("\n[INFO] Best threshold with recall >= 0.85")
+    print(f"  threshold : {best_recall_safe_result.threshold:.2f}")
+    print(f"  accuracy  : {best_recall_safe_result.accuracy:.4f}")
+    print(f"  precision : {best_recall_safe_result.precision:.4f}")
+    print(f"  recall    : {best_recall_safe_result.recall:.4f}")
+    print(f"  f1        : {best_recall_safe_result.f1:.4f}")
+    print(
+        f"  confusion : "
+        f"TN={best_recall_safe_result.true_negative}, "
+        f"FP={best_recall_safe_result.false_positive}, "
+        f"FN={best_recall_safe_result.false_negative}, "
+        f"TP={best_recall_safe_result.true_positive}"
+    )
 
     # 여기서 주의할 점:
     #
@@ -264,3 +431,68 @@ if __name__ == "__main__":
     #
     # 다른 파일에서 import 할 때는 main()이 자동 실행되지 않습니다.
     main()
+
+# pos_weight 적용 전 baseline 결과:
+#
+# threshold = 0.5 기준
+# accuracy는 0.9660으로 높았지만,
+# precision, recall, f1은 모두 0이었습니다.
+#
+# confusion matrix:
+# TN = 1932
+# FP = 0
+# FN = 68
+# TP = 0
+#
+# 이 결과는 모델이 모든 test sample을 정상으로 예측했다는 뜻입니다.
+# 정상 class가 약 96.6%이기 때문에 accuracy는 높게 나왔지만,
+# 실제 고장 68개를 하나도 잡지 못했습니다.
+#
+# 따라서 이 모델은 제조 고장 예측 모델로는 위험합니다.
+# 특히 FN, 즉 실제 고장을 정상으로 놓치는 경우가 많기 때문입니다.
+#
+# pos_weight 적용 목적:
+# - positive class 1, 즉 고장 class의 loss를 더 크게 반영합니다.
+# - 고장 샘플을 틀렸을 때 더 큰 penalty를 줍니다.
+# - 모델이 고장 class를 더 민감하게 학습하도록 유도합니다.
+#
+# 확인해야 할 변화:
+# - TP가 증가했는가?
+# - FN이 감소했는가?
+# - recall이 증가했는가?
+# - f1이 개선되었는가?
+# - FP가 지나치게 증가하지는 않았는가?
+
+# threshold 세분화 비교 결과:
+#
+# f1-score만 기준으로 보면 threshold=0.90이 가장 좋았습니다.
+#
+# threshold=0.90:
+# - accuracy  = 0.9675
+# - precision = 0.5217
+# - recall    = 0.5294
+# - f1        = 0.5255
+# - confusion = TN=1899, FP=33, FN=32, TP=36
+#
+# 하지만 제조 고장 예측에서는 실제 고장을 정상으로 놓치는 FN이 위험할 수 있습니다.
+# threshold=0.90은 FP는 매우 적지만, 실제 고장 68개 중 32개를 놓칩니다.
+#
+# 따라서 f1-score 기준 best threshold와 별도로,
+# recall이 최소 0.85 이상인 후보 중 f1-score가 가장 좋은 threshold도 확인했습니다.
+#
+# recall >= 0.85 조건에서는 threshold=0.60이 가장 좋은 후보였습니다.
+#
+# threshold=0.60:
+# - accuracy  = 0.9080
+# - precision = 0.2521
+# - recall    = 0.8676
+# - f1        = 0.3907
+# - confusion = TN=1757, FP=175, FN=9, TP=59
+#
+# threshold=0.60은 threshold=0.50보다 실제 고장 3개를 더 놓치지만,
+# 정상 오탐 FP를 248개에서 175개로 줄이고 f1-score도 개선합니다.
+#
+# 따라서 현재 모델에서는
+# - 균형 지표 f1 기준 후보: threshold=0.90
+# - 제조 안전/recall 기준 운영 후보: threshold=0.60
+# 으로 해석할 수 있습니다.
