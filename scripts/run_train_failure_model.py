@@ -50,7 +50,7 @@ from src.training.evaluate_failure_model import (
 )
 
 from src.data.scale_ai4i import scale_train_test_features
-
+from src.inference.model_artifacts import save_failure_model_artifacts
 
 def main() -> None:
     """
@@ -63,6 +63,18 @@ def main() -> None:
     -> 모델 학습
     -> 모델 평가
     -> 결과 출력
+
+    Day 4 실험 실행 스크립트입니다.
+
+    전체 흐름:
+    1. AI4I CSV 로드
+    2. 데이터 전처리
+    3. train / test shape 및 class ratio 확인
+    4. feature scaling
+    5. pos_weight를 적용한 모델 학습
+    6. 기본 threshold 평가
+    7. 여러 threshold 비교
+    8. 운영 후보 threshold 선택
     """
 
     # 1. AI4I CSV 파일을 로드합니다.
@@ -84,7 +96,14 @@ def main() -> None:
     print("[INFO] Loaded AI4I CSV")
     print(f"[INFO] Raw dataframe shape: {df.shape}")
 
+    # ------------------------------------------------------------
+    # 1. Preprocessing
+    # ------------------------------------------------------------
+
     # 2. AI4I 데이터를 모델 학습용으로 전처리합니다.
+    #
+    # CSV 원본 데이터를 바로 모델에 넣지 않고, 
+    # 컬럼 검증, Type encoding, feature / target 분리, train / test split을 먼저 수행합니다.
     #
     # preprocess_ai4i_dataframe 내부 흐름:
     #
@@ -96,13 +115,14 @@ def main() -> None:
     # 반환값은 PreprocessedAI4IData dataclass입니다.
     processed = preprocess_ai4i_dataframe(df)
 
+    print("[INFO] Preprocessing completed")
+
     scaled = scale_train_test_features(
         X_train=processed.X_train,
         X_test=processed.X_test,
     )
 
     # 전처리 후 train / test 데이터 크기를 확인합니다.
-    print("[INFO] Preprocessing completed")
     print(f"[INFO] X_train shape: {processed.X_train.shape}")
     print(f"[INFO] X_test shape: {processed.X_test.shape}")
     print(f"[INFO] y_train shape: {processed.y_train.shape}")
@@ -120,6 +140,10 @@ def main() -> None:
 
     print("[INFO] y_test class ratio:")
     print(processed.y_test.value_counts(normalize=True))
+
+    # ------------------------------------------------------------
+    # 2. Feature scaling
+    # ------------------------------------------------------------
 
 
     # pos_weight를 적용한 상태로 모델을 학습합니다.
@@ -174,6 +198,8 @@ def main() -> None:
     # 이유:
     # - test set은 모델이 처음 보는 데이터로 남겨두어야 합니다.
     # - test set의 평균/표준편차를 scaling 기준에 사용하면 data leakage가 됩니다.
+
+    # scaling은 반드시 train / test split 이후에 수행합니다.
     print("[INFO] Feature scaling started")
 
     scaled = scale_train_test_features(
@@ -183,12 +209,19 @@ def main() -> None:
 
     print("[INFO] Feature scaling completed")
 
+    # ------------------------------------------------------------
+    # 3. Training
+    # ------------------------------------------------------------
+
     # pos_weight를 적용한 상태로 모델을 학습합니다.
     #
     # 이전 baseline에서는 accuracy는 높았지만 실제 고장을 하나도 잡지 못했습니다.
     # pos_weight는 positive class 1, 즉 고장 class의 loss를 더 크게 반영합니다.
     #
     # 이번에는 feature scaling까지 적용된 X_train으로 학습합니다.
+
+    # AI4I 데이터는 고장 class가 매우 적은 불균형 데이터이므로,
+    # use_pos_weight=True를 사용해 고장 class의 loss 비중을 높입니다.
     print("[INFO] Training with pos_weight enabled")
 
     # 3. FailureMLP 모델을 학습합니다.
@@ -215,12 +248,7 @@ def main() -> None:
     training_result = train_failure_model(
         X_train=scaled.X_train,
         y_train=processed.y_train,
-        input_dim=6,
-        hidden_dim=32,
-        dropout_rate=0.2,
-        learning_rate=0.001,
-        epochs=10,
-        batch_size=32,
+        input_dim=scaled.X_train.shape[1],
         use_pos_weight=True,
     )
 
@@ -279,7 +307,7 @@ def main() -> None:
     #
     # enumerate(losses, start=1)
     # -> (1, 0.72), (2, 0.68), (3, 0.65)
-    for epoch_index, loss in enumerate(training_result.losses, start=1):
+    for epoch, loss in enumerate(training_result.losses, start=1):
         
         # f-string을 사용해 epoch 번호와 loss 값을 보기 좋게 출력합니다.
         #
@@ -301,9 +329,15 @@ def main() -> None:
         #
         # 최종 출력 예:
         #   epoch=01, loss=0.721346
-        print(f"    epoch={epoch_index:02d}, loss={loss:.6f}")
+        print(f"    epoch={epoch:02d}, loss={loss:.6f}")
     
+    # ------------------------------------------------------------
+    # 4. Evaluation
+    # ------------------------------------------------------------
+
     # 4. 학습된 모델을 test set으로 평가합니다.
+    #
+    # 기본 threshold 0.5 기준으로 먼저 평가합니다.
     #
     # threshold=0.5:
     #   sigmoid probability가 0.5 이상이면 고장으로 판단하는 baseline 기준입니다.
@@ -335,6 +369,10 @@ def main() -> None:
         f"Actual Failure   {evaluation_result.false_negative:6d}   "
         f"{evaluation_result.true_positive:7d}"
     )
+    
+    # ------------------------------------------------------------
+    # 5. Threshold comparison
+    # ------------------------------------------------------------
     
     # threshold를 더 촘촘히 비교합니다.
     #
@@ -422,6 +460,35 @@ def main() -> None:
     #
     # f1:
     #   precision과 recall의 균형
+
+    # ------------------------------------------------------------
+    # 6. Save model artifacts
+    # ------------------------------------------------------------
+    # Day 5부터는 학습 결과를 파일로 저장합니다.
+    #
+    # 저장하는 것:
+    # 1. model.pt       → 학습된 PyTorch model weight
+    # 2. scaler.joblib  → train set에 fit된 StandardScaler
+    # 3. metadata.json  → threshold, feature columns, model 설정값
+    #
+    # threshold는 제조 안전 관점에서 선택한 best_recall_safe_result 값을 사용합니다.
+    artifact_paths = save_failure_model_artifacts(
+        model=training_result.model,
+        scaler=scaled.scaler,
+        threshold=best_recall_safe_result.threshold,
+        feature_columns=list(scaled.X_train.columns),
+        artifact_dir="models/failure_mlp",
+        input_dim=scaled.X_train.shape[1],
+        hidden_dim=32,
+        dropout_rate=0.2,
+    )
+
+    print("[INFO] Model artifacts saved")
+    print(f"[INFO] model_path   : {artifact_paths.model_path}")
+    print(f"[INFO] scaler_path  : {artifact_paths.scaler_path}")
+    print(f"[INFO] metadata_path: {artifact_paths.metadata_path}")
+
+
 
 if __name__ == "__main__":
     # 이 파일을 직접 호출했을 때만 main()을 호출합니다.

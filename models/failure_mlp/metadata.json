@@ -1,0 +1,14 @@
+{
+  "threshold": 0.7,
+  "input_dim": 6,
+  "hidden_dim": 32,
+  "dropout_rate": 0.2,
+  "feature_columns": [
+    "Air temperature [K]",
+    "Process temperature [K]",
+    "Rotational speed [rpm]",
+    "Torque [Nm]",
+    "Tool wear [min]",
+    "Type"
+  ]
+}
