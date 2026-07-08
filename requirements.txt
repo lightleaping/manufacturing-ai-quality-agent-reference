@@ -9,3 +9,4 @@ pydantic
 pytest
 python-dotenv
 joblib
+shap==0.51.0
