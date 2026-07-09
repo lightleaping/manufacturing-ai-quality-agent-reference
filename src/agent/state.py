@@ -54,6 +54,61 @@ raw_sample:
 
 두 데이터의 책임을 구분합니다.
 
+Day 16 확장
+-----------
+Day 16에서는 LangGraph Agent의 실행 과정을 추적할 수 있도록
+내부 구조화 trace 데이터를 AgentState에 추가합니다.
+
+기존에는 최종 intent, prediction, warning, error는 확인할 수 있었지만,
+다음 정보는 하나의 실행 기록으로 남지 않았습니다.
+
+    어떤 node가 실행됐는지
+
+    node가 어떤 순서로 실행됐는지
+
+    node 실행을 언제 시작하고 종료했는지
+
+    node 실행에 몇 ms가 걸렸는지
+
+    conditional edge가 어떤 route를 선택했는지
+
+    fallback 경로가 실행됐는지
+
+    전체 workflow가 성공, fallback, error 중
+    어떤 상태로 종료됐는지
+
+Day 16에서는 각 요청에 고유한 trace_id를 생성하고,
+전체 trace 요약과 개별 trace event를 AgentState에 저장합니다.
+
+전체 trace 요약:
+
+    trace_id
+
+    trace_status
+
+    trace_started_at
+
+    trace_finished_at
+
+    trace_duration_ms
+
+    fallback_occurred
+
+개별 실행 기록:
+
+    trace_events
+
+trace_events에는 이후 각 node와 route 실행 결과가
+순서대로 추가될 예정입니다.
+
+중요:
+이 파일은 trace 데이터의 "구조"와 "초기값"을 정의합니다.
+
+실제로 node 실행 시간을 측정하고,
+trace event를 추가하고,
+최종 trace 상태를 결정하는 로직은
+다음 단계의 src/agent/trace.py에서 분리하여 구현합니다.
+
 중요한 점
 ---------
 1. 처음부터 모든 값이 존재하지 않습니다.
@@ -64,7 +119,9 @@ raw_sample:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Literal, NotRequired, Required, TypedDict
+from uuid import uuid4
 
 
 # risk_level은 모델 prediction 결과를 사람이 이해하기 쉽게 바꾼 위험 등급입니다.
@@ -185,6 +242,283 @@ class ChatMessage(TypedDict):
     content: str
 
 
+# TraceEventType은 trace 기록 한 개가
+# 어떤 종류의 실행을 나타내는지 구분합니다.
+#
+# node:
+#   LangGraph node 함수 실행 기록
+#
+# 예:
+#   validate_question
+#   classify_intent
+#   call_failure_prediction
+#   build_final_answer
+#
+# route:
+#   conditional edge가 다음 실행 경로를
+#   선택한 결과를 기록
+#
+# 예:
+#   route_after_validation
+#   route_after_classification
+#   route_after_prediction
+#
+# node와 route를 구분하는 이유
+# ----------------------------
+# node는 실제 검증, intent 분류, prediction,
+# 답변 생성 등의 작업을 수행합니다.
+#
+# route는 현재 state를 확인한 뒤
+# 다음에 어느 node로 이동할지 결정합니다.
+#
+# 두 실행의 책임이 다르므로 event_type으로 구분합니다.
+TraceEventType = Literal[
+    "node",
+    "route",
+]
+
+
+# TraceEventStatus는 개별 node 또는 route 실행 결과를 나타냅니다.
+#
+# success:
+#   해당 실행이 정상적으로 완료됨
+#
+# warning:
+#   핵심 실행은 완료됐지만 경고가 추가됨
+#
+# 예:
+#   OpenAI intent 분류 실패 후
+#   rule-based classifier로 정상 처리
+#
+# error:
+#   해당 실행 중 workflow에 영향을 주는 문제가 발생함
+#
+# 예:
+#   raw_sample이 없어 prediction을 수행하지 못함
+#
+# fallback:
+#   fallback 경로 또는 fallback 답변을 사용함
+#
+# 주의:
+# intent_source == "fallback"과
+# LangGraph fallback 경로는 서로 다른 개념입니다.
+#
+# intent_source == "fallback":
+#   OpenAI classifier가 실패하여
+#   rule-based classifier를 사용했다는 의미
+#
+# TraceEventStatus == "fallback":
+#   LangGraph가 실제 fallback 경로를
+#   선택하거나 fallback 답변을 사용했다는 의미
+TraceEventStatus = Literal[
+    "success",
+    "warning",
+    "error",
+    "fallback",
+]
+
+
+# TraceStatus는 요청 하나의 전체 LangGraph 실행 상태입니다.
+#
+# running:
+#   AgentState를 만들었고
+#   workflow가 아직 실행 중인 상태
+#
+# success:
+#   요청이 정상 경로로 완료된 상태
+#
+# fallback:
+#   요청 자체는 응답했지만
+#   fallback 답변 경로를 사용한 상태
+#
+# error:
+#   처리 과정에서 오류가 발생하여
+#   정상 결과를 만들지 못한 상태
+#
+# 개별 TraceEventStatus와의 차이
+# -----------------------------
+# TraceEventStatus:
+#   node 또는 route 하나의 실행 결과
+#
+# TraceStatus:
+#   요청 하나의 전체 workflow 결과
+TraceStatus = Literal[
+    "running",
+    "success",
+    "fallback",
+    "error",
+]
+
+
+class TraceEvent(TypedDict):
+    """
+    LangGraph 실행 과정에서 발생한
+    node 또는 route 기록 한 개의 구조입니다.
+
+    예 - intent 분류 node:
+
+        {
+            "sequence": 3,
+            "event_type": "node",
+            "event_name": "classify_intent",
+            "status": "success",
+            "started_at": "2026-07-10T01:12:30.120000+00:00",
+            "finished_at": "2026-07-10T01:12:30.932000+00:00",
+            "duration_ms": 812.0,
+            "metadata": {
+                "intent": "failure_prediction",
+                "intent_source": "openai",
+                "confidence": 0.95
+            }
+        }
+
+    예 - conditional routing:
+
+        {
+            "sequence": 4,
+            "event_type": "route",
+            "event_name": "route_after_classification",
+            "status": "success",
+            "started_at": "2026-07-10T01:12:30.933000+00:00",
+            "finished_at": "2026-07-10T01:12:30.933020+00:00",
+            "duration_ms": 0.02,
+            "metadata": {
+                "intent": "failure_prediction",
+                "selected_route": "failure_prediction"
+            }
+        }
+
+    왜 TypedDict를 사용하는가?
+    -------------------------
+    다음처럼 일반 dict만 사용하면:
+
+        dict[str, Any]
+
+    어떤 key가 반드시 필요한지
+    코드만 보고 알기 어렵습니다.
+
+    TraceEvent TypedDict를 사용하면
+    trace event가 어떤 필드를 가져야 하는지
+    타입 수준에서 명확하게 표현할 수 있습니다.
+
+    TraceEvent는 total=True가 기본값입니다.
+
+    따라서 아래 필드는 모두 필수입니다.
+
+        sequence
+
+        event_type
+
+        event_name
+
+        status
+
+        started_at
+
+        finished_at
+
+        duration_ms
+
+        metadata
+    """
+
+    # 하나의 trace 안에서 event가 발생한 순서입니다.
+    #
+    # 첫 번째 event:
+    #   sequence = 1
+    #
+    # 두 번째 event:
+    #   sequence = 2
+    #
+    # list 자체도 순서를 유지하지만,
+    # sequence 값을 별도로 저장하면
+    # 이후 JSONL, DB, Dashboard에서
+    # 실행 순서를 명확하게 정렬할 수 있습니다.
+    sequence: int
+
+    # 이 event가 LangGraph node 실행인지,
+    # conditional route 실행인지 구분합니다.
+    event_type: TraceEventType
+
+    # 실제 실행된 node 또는 route의 이름입니다.
+    #
+    # 예:
+    # "validate_question"
+    # "classify_intent"
+    # "route_after_classification"
+    # "call_failure_prediction"
+    event_name: str
+
+    # 개별 event의 실행 결과입니다.
+    #
+    # success
+    # warning
+    # error
+    # fallback
+    status: TraceEventStatus
+
+    # 해당 event 실행을 시작한 UTC 시각입니다.
+    #
+    # ISO 8601 문자열 형식을 사용합니다.
+    #
+    # 예:
+    # "2026-07-10T01:12:30.120000+00:00"
+    started_at: str
+
+    # 해당 event 실행이 끝난 UTC 시각입니다.
+    #
+    # ISO 8601 문자열 형식을 사용합니다.
+    finished_at: str
+
+    # 해당 event 실행에 걸린 시간입니다.
+    #
+    # 단위:
+    #   millisecond
+    #
+    # 예:
+    #   12.5
+    #
+    # 의미:
+    #   12.5 ms
+    duration_ms: float
+
+    # event 종류에 따라 추가로 확인할 값을 저장합니다.
+    #
+    # intent 분류 node 예:
+    #
+    # {
+    #   "intent": "failure_prediction",
+    #   "intent_source": "openai",
+    #   "confidence": 0.95
+    # }
+    #
+    # routing 예:
+    #
+    # {
+    #   "selected_route": "failure_prediction"
+    # }
+    #
+    # prediction node 예:
+    #
+    # {
+    #   "prediction_succeeded": True,
+    #   "prediction": 1,
+    #   "risk_level": "HIGH",
+    #   "evidence_count": 8
+    # }
+    #
+    # metadata에 모든 원본 데이터를 넣지는 않습니다.
+    #
+    # 전체 chat_history,
+    # 전체 raw_sample,
+    # API key,
+    # 환경 변수,
+    # OpenAI 원본 응답 전문 등은
+    # 민감 정보 노출과 trace 크기 증가를 막기 위해
+    # 구조화 trace에 그대로 저장하지 않습니다.
+    metadata: dict[str, Any]
+
+
 class AgentState(TypedDict, total=False):
     """
     LangGraph workflow에서 node들이 공유하는 상태입니다.
@@ -220,6 +554,27 @@ class AgentState(TypedDict, total=False):
         workflow 중간에 생길 수도 있고, 없을 수도 있는 필드입니다.
 
     현재는 question만 Required로 둡니다.
+
+    Day 16 trace 필드도 왜 NotRequired인가?
+    -------------------------------------
+    create_initial_agent_state()를 사용하면
+    trace_id와 trace 초기값을 항상 생성합니다.
+
+    하지만 기존 테스트와 일부 node 테스트에서는
+    AgentState를 helper 함수 없이 직접 만들 수도 있습니다.
+
+    예:
+
+        state: AgentState = {
+            "question": "고장 위험을 예측해줘."
+        }
+
+    기존 수동 state 생성 방식과의 호환성을 유지하기 위해
+    trace 필드는 NotRequired로 둡니다.
+
+    실제 public runner에서는
+    create_initial_agent_state()를 사용하므로
+    trace 초기값이 생성될 예정입니다.
     """
 
     # 사용자의 원본 질문입니다.
@@ -392,11 +747,155 @@ class AgentState(TypedDict, total=False):
     # LangGraph state에서도 사용자에게 안내할 한계를 담을 수 있습니다.
     limitations: NotRequired[list[str]]
 
-    # trace_id는 요청 하나를 추적하기 위한 ID입니다.
+    # trace_id는 요청 하나의 전체 실행을 식별하는 고유 ID입니다.
     #
-    # 지금 당장 필수는 아니지만,
-    # 나중에 로그, LangSmith, OpenTelemetry 등과 연결할 때 유용합니다.
+    # Day 13에서는 향후 확장을 위해 필드만 준비했습니다.
+    #
+    # Day 16에서는 create_initial_agent_state()가 실행될 때
+    # uuid4().hex를 사용하여 실제 값을 생성합니다.
+    #
+    # 예:
+    # "908759dd97bd4a3eb7494b68f76f871c"
+    #
+    # 같은 요청 안에서 발생하는 모든 node와 route event는
+    # 같은 trace_id 아래에 묶입니다.
+    #
+    # 이후 확장:
+    # - 구조화 로그
+    # - 실행 이력 DB
+    # - LangSmith
+    # - OpenTelemetry
+    # - Streamlit trace Dashboard
     trace_id: NotRequired[str]
+
+    # 요청 하나의 전체 workflow 처리 상태입니다.
+    #
+    # 초기값:
+    #   "running"
+    #
+    # workflow 완료 후에는
+    # 다음 단계의 trace 종료 함수가 상태를 변경할 예정입니다.
+    #
+    # 정상 완료:
+    #   "success"
+    #
+    # fallback 답변 사용:
+    #   "fallback"
+    #
+    # 처리 실패:
+    #   "error"
+    trace_status: NotRequired[TraceStatus]
+
+    # 전체 trace를 시작한 UTC 시각입니다.
+    #
+    # create_initial_agent_state()를 호출할 때 생성합니다.
+    #
+    # ISO 8601 예:
+    # "2026-07-10T01:12:30.120000+00:00"
+    #
+    # 왜 UTC를 사용하는가?
+    # --------------------
+    # 서버가 다른 지역이나 다른 time zone에서 실행돼도
+    # 같은 시간 기준으로 로그를 비교하기 쉽기 때문입니다.
+    trace_started_at: NotRequired[str]
+
+    # 전체 trace가 종료된 UTC 시각입니다.
+    #
+    # 초기 state에서는 아직 workflow가 끝나지 않았으므로
+    # None으로 초기화합니다.
+    #
+    # workflow가 끝나면
+    # 다음 단계의 trace 종료 함수가 실제 시각을 저장합니다.
+    trace_finished_at: NotRequired[str | None]
+
+    # 전체 LangGraph workflow 실행 시간입니다.
+    #
+    # 단위:
+    #   millisecond
+    #
+    # 초기 state에서는 아직 workflow가 끝나지 않았으므로
+    # None으로 초기화합니다.
+    #
+    # 예:
+    #   859.34
+    #
+    # 의미:
+    #   전체 workflow 실행에 859.34 ms가 걸림
+    trace_duration_ms: NotRequired[float | None]
+
+    # LangGraph가 실제 fallback 경로를 사용했는지 나타냅니다.
+    #
+    # 초기값:
+    #   False
+    #
+    # fallback route 또는 fallback answer가 실행되면
+    # 다음 단계의 trace 로직에서 True로 변경합니다.
+    #
+    # 주의:
+    # intent_source == "fallback"과는 다른 값입니다.
+    #
+    # intent_source == "fallback":
+    #   OpenAI intent 분류 실패 후
+    #   rule-based classifier를 사용했다는 의미
+    #
+    # fallback_occurred == True:
+    #   LangGraph가 실제 fallback 처리 경로를
+    #   실행했다는 의미
+    fallback_occurred: NotRequired[bool]
+
+    # 요청 하나에서 발생한 node와 route 실행 기록입니다.
+    #
+    # 초기값:
+    #   []
+    #
+    # 이후 실행 예:
+    #
+    # [
+    #   {
+    #     "sequence": 1,
+    #     "event_type": "node",
+    #     "event_name": "validate_question",
+    #     "status": "success",
+    #     ...
+    #   },
+    #   {
+    #     "sequence": 2,
+    #     "event_type": "route",
+    #     "event_name": "route_after_validation",
+    #     "status": "success",
+    #     ...
+    #   }
+    # ]
+    #
+    # node와 route가 실행될 때마다
+    # 다음 단계의 src/agent/trace.py가
+    # TraceEvent를 생성하여 이 list에 추가할 예정입니다.
+    trace_events: NotRequired[list[TraceEvent]]
+
+    # 가장 최근 route 판단 결과입니다.
+    #
+    # Day 16에서는 routing 함수가 선택한 경로를
+    # 먼저 AgentState에 저장합니다.
+    #
+    # 예:
+    #
+    # "classify"
+    #
+    # "failure_prediction"
+    #
+    # "dataset_schema"
+    #
+    # "fallback"
+    #
+    # "final"
+    #
+    # 이후 실제 LangGraph conditional edge는
+    # route 함수를 다시 실행하지 않고
+    # 이 값을 읽어 다음 node를 선택합니다.
+    #
+    # 이 값은 내부 workflow 제어용이며
+    # 사용자 API response에 반드시 노출할 필요는 없습니다.
+    selected_route: NotRequired[str]
 
     include_shap: NotRequired[bool]
     include_global_importance: NotRequired[bool]
@@ -469,7 +968,80 @@ def create_initial_agent_state(
     -------
     AgentState
         LangGraph workflow에 넣을 초기 상태입니다.
+
+    Day 16 trace 초기화
+    ------------------
+    이 함수는 일반 Agent 값뿐 아니라
+    요청 하나의 trace 초기 상태도 함께 생성합니다.
+
+    생성되는 값:
+
+        trace_id:
+            요청을 구분하는 고유 ID
+
+        trace_status:
+            아직 workflow 실행 중이므로 "running"
+
+        trace_started_at:
+            초기 state를 만든 UTC 시각
+
+        trace_finished_at:
+            아직 끝나지 않았으므로 None
+
+        trace_duration_ms:
+            아직 전체 시간이 계산되지 않았으므로 None
+
+        fallback_occurred:
+            아직 fallback이 발생하지 않았으므로 False
+
+        trace_events:
+            아직 node나 route가 실행되지 않았으므로 빈 list
     """
+
+    # uuid4()는 무작위 기반 UUID 객체를 생성합니다.
+    #
+    # 예:
+    #
+    # UUID(
+    #     "908759dd-97bd-4a3e-b749-4b68f76f871c"
+    # )
+    #
+    # .hex를 사용하면 하이픈이 없는
+    # 32자리 16진수 문자열을 얻습니다.
+    #
+    # 예:
+    #
+    # "908759dd97bd4a3eb7494b68f76f871c"
+    #
+    # 요청마다 새로운 값이 생성되므로
+    # 여러 Agent 실행을 서로 구분할 수 있습니다.
+    trace_id = uuid4().hex
+
+    # datetime.now(timezone.utc)는
+    # 현재 UTC 시각을 timezone 정보와 함께 만듭니다.
+    #
+    # 예:
+    #
+    # datetime(
+    #     2026,
+    #     7,
+    #     10,
+    #     1,
+    #     12,
+    #     30,
+    #     tzinfo=timezone.utc,
+    # )
+    #
+    # .isoformat()은 datetime 객체를
+    # 로그와 JSON에 저장하기 쉬운 문자열로 변환합니다.
+    #
+    # 예:
+    #
+    # "2026-07-10T01:12:30.120000+00:00"
+    #
+    # Day 16에서는 trace 시각을 UTC 기반
+    # ISO 8601 문자열로 통일합니다.
+    trace_started_at = datetime.now(timezone.utc).isoformat()
 
     state: AgentState = {
         # question은 Required 필드이므로 반드시 넣습니다.
@@ -529,6 +1101,40 @@ def create_initial_agent_state(
 
         # limitations도 최종 답변에 붙일 수 있으므로 기본값을 빈 list로 둡니다.
         "limitations": [],
+
+        # Day 16:
+        # 요청 하나를 구분하는 고유 trace ID입니다.
+        #
+        # create_initial_agent_state()를 호출할 때마다
+        # 새로운 UUID 기반 문자열이 생성됩니다.
+        "trace_id": trace_id,
+
+        # 초기 state를 만든 직후에는
+        # LangGraph workflow가 아직 끝나지 않았으므로
+        # 전체 trace 상태를 "running"으로 설정합니다.
+        "trace_status": "running",
+
+        # 요청 trace를 시작한 UTC 시각입니다.
+        "trace_started_at": trace_started_at,
+
+        # 아직 workflow가 끝나지 않았으므로
+        # 종료 시각은 None입니다.
+        "trace_finished_at": None,
+
+        # 아직 전체 workflow 실행 시간이 계산되지 않았으므로
+        # duration도 None입니다.
+        "trace_duration_ms": None,
+
+        # 초기 state에서는 아직 fallback 경로를
+        # 실행하지 않았으므로 False입니다.
+        "fallback_occurred": False,
+
+        # 아직 LangGraph node나 route가 실행되지 않았으므로
+        # trace event 목록은 빈 list로 시작합니다.
+        #
+        # 다음 단계의 src/agent/trace.py가
+        # 각 실행 기록을 이 list에 추가할 예정입니다.
+        "trace_events": [],
     }
 
     # raw_sample이 있는 경우에만 state에 넣습니다.

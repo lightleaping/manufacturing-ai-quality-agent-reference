@@ -42,7 +42,34 @@ Agent 요청마다 대화 이력은 서로 독립적이어야 합니다.
 이전 요청의 대화가 다음 요청에 잘못 섞이면
 현재 질문의 문맥이나 intent를 잘못 판단할 수 있으므로,
 chat_history의 초기화와 복사 동작을 테스트합니다.
+
+Day 16 확장
+-----------
+Day 16에서는 LangGraph Agent 실행 과정을 추적할 수 있도록
+AgentState에 구조화 trace 초기값을 추가합니다.
+
+따라서 아래 동작도 추가로 검증합니다.
+
+1. 초기 state에 trace 관련 기본 필드가 생성되는가?
+
+2. trace_id가 요청마다 새롭게 생성되는가?
+
+3. trace_id가 UUID 기반 32자리 16진수 문자열인가?
+
+4. trace_started_at이 UTC 기반 ISO 8601 문자열인가?
+
+5. Agent 실행마다 서로 독립된 trace_events list를 사용하는가?
+
+현재 단계에서는 trace 데이터의 구조와 초기값만 테스트합니다.
+
+실제 node 실행 시간 측정,
+node event 추가,
+route event 추가,
+trace 종료 상태 계산은
+다음 단계의 src/agent/trace.py에서 구현하고 별도로 테스트합니다.
 """
+
+from datetime import datetime, timezone
 
 from src.agent.state import (
     append_error,
@@ -57,6 +84,29 @@ def test_create_initial_agent_state_has_required_defaults():
     """
     초기 AgentState에는
     question, chat_history, warnings, errors, limitations가 있어야 합니다.
+
+    Day 16부터는 아래 trace 초기값도 있어야 합니다.
+
+    trace_id:
+        요청 하나를 구분하는 고유 ID
+
+    trace_status:
+        workflow가 아직 종료되지 않았으므로 "running"
+
+    trace_started_at:
+        trace가 시작된 UTC 시각
+
+    trace_finished_at:
+        아직 workflow가 종료되지 않았으므로 None
+
+    trace_duration_ms:
+        아직 전체 실행 시간이 계산되지 않았으므로 None
+
+    fallback_occurred:
+        아직 fallback 경로를 실행하지 않았으므로 False
+
+    trace_events:
+        아직 node나 route가 실행되지 않았으므로 빈 list
 
     question:
         사용자의 원본 질문이므로 필수입니다.
@@ -95,6 +145,266 @@ def test_create_initial_agent_state_has_required_defaults():
     assert state["warnings"] == []
     assert state["errors"] == []
     assert state["limitations"] == []
+
+    # Day 16:
+    # trace_id는 요청마다 생성되는 문자열이어야 합니다.
+    #
+    # 구체적인 길이와 UUID 형식은
+    # 별도의 테스트에서 자세히 검증합니다.
+    assert isinstance(state["trace_id"], str)
+
+    # 초기 state를 만든 직후에는
+    # LangGraph workflow가 아직 실행 중이므로
+    # trace_status는 "running"이어야 합니다.
+    assert state["trace_status"] == "running"
+
+    # trace 시작 시각은 문자열로 생성되어야 합니다.
+    #
+    # ISO 8601 형식과 UTC 여부는
+    # 별도의 테스트에서 자세히 검증합니다.
+    assert isinstance(state["trace_started_at"], str)
+
+    # 아직 workflow가 끝나지 않았으므로
+    # 종료 시각은 None이어야 합니다.
+    assert state["trace_finished_at"] is None
+
+    # 아직 전체 workflow 실행 시간이
+    # 계산되지 않았으므로 None이어야 합니다.
+    assert state["trace_duration_ms"] is None
+
+    # 초기 state에서는 아직 fallback 경로를
+    # 실행하지 않았으므로 False여야 합니다.
+    assert state["fallback_occurred"] is False
+
+    # 아직 node와 route가 실행되지 않았으므로
+    # trace event 목록은 빈 list여야 합니다.
+    assert state["trace_events"] == []
+
+
+def test_create_initial_agent_state_creates_unique_trace_id_for_each_call():
+    """
+    create_initial_agent_state()를 호출할 때마다
+    서로 다른 trace_id가 생성되어야 합니다.
+
+    왜 요청마다 새로운 trace_id가 필요한가?
+    ---------------------------------------
+    trace_id는 Agent 요청 하나의 전체 실행을 구분하는 ID입니다.
+
+    예:
+
+        첫 번째 요청:
+            "이 설비의 고장 위험을 예측해줘."
+
+        두 번째 요청:
+            "AI4I 데이터셋 feature를 알려줘."
+
+    두 요청은 서로 다른 LangGraph 실행입니다.
+
+    따라서 같은 trace_id를 공유하면
+    이후 로그, 실행 이력 DB, Dashboard에서
+    서로 다른 요청의 node 실행 기록이
+    하나의 요청처럼 잘못 섞일 수 있습니다.
+
+    create_initial_agent_state()는 호출할 때마다:
+
+        uuid4().hex
+
+    를 실행하여 새로운 trace_id를 생성합니다.
+    """
+
+    first_state = create_initial_agent_state(
+        question="이 설비 조건이면 고장 위험이 높아?"
+    )
+
+    second_state = create_initial_agent_state(
+        question="AI4I 데이터셋 feature는 뭐야?"
+    )
+
+    # 서로 다른 Agent 요청이므로
+    # trace_id도 서로 달라야 합니다.
+    assert first_state["trace_id"] != second_state["trace_id"]
+
+
+def test_create_initial_agent_state_creates_32_character_hex_trace_id():
+    """
+    trace_id는 uuid4().hex로 만든
+    32자리 16진수 문자열이어야 합니다.
+
+    uuid4() 예:
+
+        UUID(
+            "908759dd-97bd-4a3e-b749-4b68f76f871c"
+        )
+
+    uuid4().hex 예:
+
+        "908759dd97bd4a3eb7494b68f76f871c"
+
+    .hex를 사용하므로:
+
+    1. 하이픈이 없습니다.
+
+    2. 문자열 길이는 32입니다.
+
+    3. 0~9, a~f 범위의
+       16진수 문자열로 변환할 수 있습니다.
+    """
+
+    state = create_initial_agent_state(
+        question="이 설비 조건이면 고장 위험이 높아?"
+    )
+
+    trace_id = state["trace_id"]
+
+    # uuid4().hex 결과는 문자열입니다.
+    assert isinstance(trace_id, str)
+
+    # 하이픈을 제거한 UUID hex 문자열은
+    # 길이가 32여야 합니다.
+    assert len(trace_id) == 32
+
+    # int(trace_id, 16)은 문자열을
+    # 16진수 정수로 변환합니다.
+    #
+    # trace_id 안에 16진수로 사용할 수 없는 문자가 있다면
+    # ValueError가 발생하여 테스트가 실패합니다.
+    #
+    # 반환값 자체가 중요한 것이 아니라,
+    # 정상적인 16진수 문자열인지 검증하는 것이 목적입니다.
+    int(trace_id, 16)
+
+
+def test_create_initial_agent_state_creates_utc_iso_trace_started_at():
+    """
+    trace_started_at은
+    UTC 기반 ISO 8601 문자열이어야 합니다.
+
+    예:
+
+        "2026-07-10T01:12:30.120000+00:00"
+
+    왜 UTC를 사용하는가?
+    --------------------
+    서버가 서울, 미국, 유럽 등
+    서로 다른 time zone에서 실행되더라도
+    같은 시간 기준으로 trace를 비교하기 쉽기 때문입니다.
+
+    ISO 8601 문자열을 사용하는 이유
+    --------------------------------
+    datetime 객체는 그대로 JSON 응답에 넣기 어려울 수 있습니다.
+
+    .isoformat()을 사용하면
+    로그, JSON, DB에 저장하기 쉬운
+    표준 형태의 문자열을 만들 수 있습니다.
+    """
+
+    state = create_initial_agent_state(
+        question="이 설비 조건이면 고장 위험이 높아?"
+    )
+
+    trace_started_at = state["trace_started_at"]
+
+    # datetime.fromisoformat()은
+    # ISO 8601 형식 문자열을 datetime 객체로 변환합니다.
+    #
+    # 문자열 형식이 올바르지 않다면
+    # ValueError가 발생하여 테스트가 실패합니다.
+    parsed_started_at = datetime.fromisoformat(
+        trace_started_at
+    )
+
+    # timezone 정보가 없는 datetime은
+    # tzinfo가 None입니다.
+    #
+    # Day 16에서는 UTC timezone 정보를
+    # 포함해야 하므로 None이면 안 됩니다.
+    assert parsed_started_at.tzinfo is not None
+
+    # utcoffset()은 현재 datetime이
+    # UTC와 얼마나 차이 나는지 반환합니다.
+    #
+    # UTC라면 차이가 0이어야 합니다.
+    assert (
+        parsed_started_at.utcoffset()
+        == timezone.utc.utcoffset(parsed_started_at)
+    )
+
+
+def test_create_initial_agent_state_creates_independent_trace_events_for_each_call():
+    """
+    create_initial_agent_state()를 여러 번 호출하면
+    각 AgentState는 서로 독립된 trace_events list를 가져야 합니다.
+
+    왜 이 테스트가 필요한가?
+    -------------------------
+    trace_events에는 앞으로 다음 실행 기록이 누적됩니다.
+
+        validate_question
+
+        route_after_validation
+
+        classify_intent
+
+        route_after_classification
+
+        call_failure_prediction
+
+        build_final_answer
+
+    서로 다른 Agent 요청이
+    같은 trace_events list를 공유하면,
+    첫 번째 요청의 node 기록이
+    두 번째 요청 trace에 섞일 수 있습니다.
+
+    따라서 요청마다 새로운 빈 list를 생성해야 합니다.
+    """
+
+    first_state = create_initial_agent_state(
+        question="이 설비 조건이면 고장 위험이 높아?"
+    )
+
+    second_state = create_initial_agent_state(
+        question="AI4I 데이터셋 feature는 뭐야?"
+    )
+
+    # 아직 node와 route를 실행하지 않았으므로
+    # 두 trace event 목록의 값은 모두 빈 list입니다.
+    assert first_state["trace_events"] == []
+    assert second_state["trace_events"] == []
+
+    # 첫 번째 요청의 trace_events에만
+    # 테스트용 trace event를 추가합니다.
+    first_state["trace_events"].append(
+        {
+            "sequence": 1,
+            "event_type": "node",
+            "event_name": "validate_question",
+            "status": "success",
+            "started_at": (
+                "2026-07-10T01:12:30.120000+00:00"
+            ),
+            "finished_at": (
+                "2026-07-10T01:12:30.121000+00:00"
+            ),
+            "duration_ms": 1.0,
+            "metadata": {},
+        }
+    )
+
+    # 첫 번째 AgentState에는
+    # trace event가 한 개 추가되어야 합니다.
+    assert len(first_state["trace_events"]) == 1
+
+    # 두 번째 AgentState는
+    # 첫 번째 state의 변경에 영향을 받지 않아야 합니다.
+    assert second_state["trace_events"] == []
+
+    # 두 list의 값이 처음에는 모두 빈 list였더라도,
+    # 실제 메모리에서는 서로 다른 객체여야 합니다.
+    assert (
+        first_state["trace_events"]
+        is not second_state["trace_events"]
+    )
 
 
 def test_create_initial_agent_state_creates_independent_chat_history_for_each_call():
@@ -398,7 +708,7 @@ def test_append_error_adds_error_to_existing_list():
 
 def test_append_error_creates_error_list_if_missing():
     """
-    state에 errors key가 없어도 append_error()는 안전하게 동작해야 합니다.
+    state에 errors key가 없어도 append_error()은 안전하게 동작해야 합니다.
     """
 
     state = {

@@ -137,7 +137,9 @@ class AgentEvidenceResponse(BaseModel):
     contribution: float | None = None
     importance: float | None = None
     severity: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(
+        default_factory=dict
+    )
 
 
 class FailurePredictionResponse(BaseModel):
@@ -167,8 +169,13 @@ class FailurePredictionResponse(BaseModel):
     evidence: list[AgentEvidenceResponse]
     answer: str
 
-    warnings: list[str] = Field(default_factory=list)
-    limitations: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(
+        default_factory=list
+    )
+
+    limitations: list[str] = Field(
+        default_factory=list
+    )
 
 
 # ============================================================
@@ -184,6 +191,7 @@ class FailurePredictionResponse(BaseModel):
 #
 # 즉, Day 14 endpoint의 중심은 raw_sample이 아니라 question입니다.
 # raw_sample은 failure_prediction intent일 때만 필요합니다.
+
 
 class LangGraphRawSampleRequest(BaseModel):
     """
@@ -212,6 +220,7 @@ class LangGraphRawSampleRequest(BaseModel):
     torque: float
     tool_wear: float
     type: str
+
 
 # ============================================================
 # Day 15 - Chat History / Multi-turn Request Schema
@@ -314,7 +323,10 @@ class ChatMessageRequest(BaseModel):
     #     "system"
     #     "developer"
     #     "uesr"
-    role: Literal["user", "assistant"] = Field(
+    role: Literal[
+        "user",
+        "assistant",
+    ] = Field(
         ...,
         description=(
             "Message author. "
@@ -348,6 +360,7 @@ class ChatMessageRequest(BaseModel):
             "이 설비 조건이면 고장 위험이 높아?"
         ],
     )
+
 
 class LangGraphAgentQueryRequest(BaseModel):
     """
@@ -424,7 +437,9 @@ class LangGraphAgentQueryRequest(BaseModel):
     #
     # 가 한 번의 대화라고 보면,
     # 메시지 6개는 최근 약 3회의 대화에 해당합니다.
-    chat_history: list[ChatMessageRequest] = Field(
+    chat_history: list[
+        ChatMessageRequest
+    ] = Field(
         default_factory=list,
         max_length=6,
         description=(
@@ -438,13 +453,267 @@ class LangGraphAgentQueryRequest(BaseModel):
     #
     # chat_history에 이전 설비 값이 적혀 있더라도
     # raw_sample을 자동으로 대체하지 않습니다.
-    raw_sample: LangGraphRawSampleRequest | None = None
+    raw_sample: (
+        LangGraphRawSampleRequest
+        |
+        None
+    ) = None
 
     # SHAP local explanation 사용 여부입니다.
     include_shap: bool = True
 
     # global permutation importance evidence 사용 여부입니다.
     include_global_importance: bool = True
+
+
+# ============================================================
+# Day 16 - LangGraph Trace / Observability Response Schema
+# ============================================================
+#
+# Day 15까지 LangGraph API response에서는
+# 최종 intent, prediction, answer, warning, error를 확인할 수 있었습니다.
+#
+# 하지만 최종 결과만으로는 아래 정보를 확인하기 어려웠습니다.
+#
+# 어떤 node가 실행됐는가?
+#
+# node가 어떤 순서로 실행됐는가?
+#
+# node 실행에 얼마나 시간이 걸렸는가?
+#
+# 어떤 route가 선택됐는가?
+#
+# fallback 경로가 사용됐는가?
+#
+# 전체 workflow가 success, fallback, error 중
+# 어떤 상태로 끝났는가?
+#
+# Day 16에서는 AgentState의 구조화 trace를
+# FastAPI JSON response로 반환하기 위한 schema를 추가합니다.
+
+
+class TraceEventResponse(BaseModel):
+    """
+    LangGraph 실행 과정에서 발생한
+    node 또는 route trace event 한 개의 API 응답 schema입니다.
+
+    AgentState 내부에서는
+    src/agent/state.py의 TraceEvent TypedDict를 사용합니다.
+
+    FastAPI 응답에서는
+    TraceEventResponse Pydantic model을 사용합니다.
+
+    왜 내부 TypedDict와 API Pydantic model을 구분하는가?
+    ---------------------------------------------------
+    TypedDict:
+        Python 내부 코드의 dict 구조를
+        정적 타입 수준에서 표현합니다.
+
+    Pydantic BaseModel:
+        FastAPI response를 검증하고,
+        JSON schema와 Swagger 문서를 생성합니다.
+
+    즉:
+
+        Agent 내부
+
+        TraceEvent TypedDict
+
+                │
+
+                ▼
+
+        FastAPI 응답
+
+        TraceEventResponse
+
+
+    응답 예
+    -------
+    {
+        "sequence": 3,
+        "event_type": "node",
+        "event_name": "classify_intent",
+        "status": "success",
+        "started_at": "2026-07-10T01:12:30.120000+00:00",
+        "finished_at": "2026-07-10T01:12:30.932000+00:00",
+        "duration_ms": 812.0,
+        "metadata": {
+            "intent": "failure_prediction",
+            "intent_source": "openai",
+            "confidence": 0.95
+        }
+    }
+    """
+
+    # 하나의 trace 안에서 event가 실행된 순서입니다.
+    #
+    # 첫 번째 event:
+    #
+    # sequence = 1
+    #
+    # 두 번째 event:
+    #
+    # sequence = 2
+    #
+    # ge=1:
+    #   sequence는 1 이상이어야 합니다.
+    sequence: int = Field(
+        ...,
+        ge=1,
+        description=(
+            "Execution order of the trace event. "
+            "Starts from 1."
+        ),
+        examples=[1],
+    )
+
+    # trace event 종류입니다.
+    #
+    # node:
+    #   실제 LangGraph node 실행
+    #
+    # route:
+    #   conditional routing 결과
+    event_type: Literal[
+        "node",
+        "route",
+    ] = Field(
+        ...,
+        description=(
+            "Trace event type. "
+            "Either node execution or route selection."
+        ),
+        examples=["node"],
+    )
+
+    # 실제 실행된 node 또는 route 이름입니다.
+    #
+    # 예:
+    #
+    # validate_question
+    #
+    # classify_intent
+    #
+    # route_after_classification
+    #
+    # call_failure_prediction
+    event_name: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Executed LangGraph node or route name."
+        ),
+        examples=["classify_intent"],
+    )
+
+    # 개별 trace event 처리 상태입니다.
+    #
+    # success:
+    #   정상 실행
+    #
+    # warning:
+    #   실행은 완료됐지만 warning 추가
+    #
+    # error:
+    #   현재 node 실행에서 error 추가 또는 예외 발생
+    #
+    # fallback:
+    #   fallback route 또는 fallback node 실행
+    status: Literal[
+        "success",
+        "warning",
+        "error",
+        "fallback",
+    ] = Field(
+        ...,
+        description=(
+            "Execution status of this trace event."
+        ),
+        examples=["success"],
+    )
+
+    # 해당 node 또는 route 실행을 시작한 UTC 시각입니다.
+    #
+    # 현재 내부 AgentState에서는
+    # ISO 8601 문자열로 저장합니다.
+    #
+    # 예:
+    #
+    # 2026-07-10T01:12:30.120000+00:00
+    started_at: str = Field(
+        ...,
+        description=(
+            "UTC start time in ISO 8601 format."
+        ),
+        examples=[
+            "2026-07-10T01:12:30.120000+00:00"
+        ],
+    )
+
+    # 해당 node 또는 route 실행이 끝난 UTC 시각입니다.
+    finished_at: str = Field(
+        ...,
+        description=(
+            "UTC finish time in ISO 8601 format."
+        ),
+        examples=[
+            "2026-07-10T01:12:30.932000+00:00"
+        ],
+    )
+
+    # node 또는 route 실행 시간입니다.
+    #
+    # 단위:
+    #
+    # millisecond
+    #
+    # ge=0:
+    #   실행 시간은 음수가 될 수 없습니다.
+    duration_ms: float = Field(
+        ...,
+        ge=0.0,
+        description=(
+            "Execution duration in milliseconds."
+        ),
+        examples=[812.0],
+    )
+
+    # node 또는 route별 추가 요약 정보입니다.
+    #
+    # intent node 예:
+    #
+    # {
+    #     "intent": "failure_prediction",
+    #     "intent_source": "openai",
+    #     "confidence": 0.95
+    # }
+    #
+    # route 예:
+    #
+    # {
+    #     "selected_route": "failure_prediction"
+    # }
+    #
+    # prediction 예:
+    #
+    # {
+    #     "prediction_succeeded": true,
+    #     "prediction": 1,
+    #     "risk_level": "HIGH"
+    # }
+    #
+    # metadata는 event마다 구조가 다르므로
+    # dict[str, Any]로 표현합니다.
+    metadata: dict[
+        str,
+        Any,
+    ] = Field(
+        default_factory=dict,
+        description=(
+            "Structured metadata for the node or route."
+        ),
+    )
 
 
 class LangGraphAgentQueryResponse(BaseModel):
@@ -458,18 +727,60 @@ class LangGraphAgentQueryResponse(BaseModel):
     이유:
         dataset_schema_query나 unknown intent에서는
         prediction 자체를 수행하지 않기 때문입니다.
+
+    Day 16 확장
+    -----------
+    최종 Agent 결과뿐 아니라
+    내부 실행 과정을 확인할 수 있도록
+    구조화 trace 정보를 추가합니다.
+
+    추가 항목:
+
+        trace_id
+
+        trace_status
+
+        trace_started_at
+
+        trace_finished_at
+
+        trace_duration_ms
+
+        fallback_occurred
+
+        trace_events
+
+
+    기존 API 호환성
+    ---------------
+    Day 16 trace 필드에는 기본값을 둡니다.
+
+    따라서 기존 테스트나 다른 Python 코드에서
+    trace field 없이 response model을 직접 생성하더라도
+    기존 방식이 즉시 깨지지 않습니다.
+
+    실제 /agent/langgraph-query endpoint에서는
+    다음 단계에서 AgentState의 trace 값을 연결하여
+    실제 trace 정보를 반환합니다.
     """
 
     question: str
     intent: str
+
     confidence: float | None = None
+
     intent_source: str | None = None
+
     intent_reason: str | None = None
 
     prediction: int | None = None
+
     probability: float | None = None
+
     threshold: float | None = None
+
     risk_level: str | None = None
+
     recommended_action: str | None = None
 
     answer: str
@@ -480,7 +791,9 @@ class LangGraphAgentQueryResponse(BaseModel):
     #
     # 위 AgentEvidenceResponse의 metadata에서도
     # 같은 방식으로 Field(default_factory=dict)를 사용하고 있습니다.
-    evidence: list[dict[str, Any]] = Field(
+    evidence: list[
+        dict[str, Any]
+    ] = Field(
         default_factory=list
     )
 
@@ -494,4 +807,179 @@ class LangGraphAgentQueryResponse(BaseModel):
 
     limitations: list[str] = Field(
         default_factory=list
+    )
+
+    # --------------------------------------------------------
+    # Day 16 - 전체 trace 요약
+    # --------------------------------------------------------
+
+    # 요청 하나의 전체 LangGraph 실행을 구분하는 ID입니다.
+    #
+    # 예:
+    #
+    # "908759dd97bd4a3eb7494b68f76f871c"
+    #
+    # create_initial_agent_state()에서
+    # uuid4().hex를 사용해 생성합니다.
+    #
+    # None 기본값을 사용하는 이유:
+    #   기존 response model 생성 코드와의
+    #   하위 호환성을 유지하기 위해서입니다.
+    #
+    # 실제 LangGraph endpoint에서는
+    # 다음 단계에서 AgentState 값을 전달합니다.
+    trace_id: str | None = Field(
+        default=None,
+        description=(
+            "Unique identifier for one LangGraph execution."
+        ),
+        examples=[
+            "908759dd97bd4a3eb7494b68f76f871c"
+        ],
+    )
+
+    # 요청 하나의 전체 workflow 처리 상태입니다.
+    #
+    # running:
+    #   아직 workflow 실행 중
+    #
+    # success:
+    #   정상 경로로 완료
+    #
+    # fallback:
+    #   fallback 경로로 사용자 응답 완료
+    #
+    # error:
+    #   정상 결과를 만들지 못한 오류 상태
+    #
+    # 실제 API response는 graph.invoke()와
+    # finalize_trace() 이후 반환되므로
+    # 일반적으로 success, fallback, error 중 하나입니다.
+    trace_status: (
+        Literal[
+            "running",
+            "success",
+            "fallback",
+            "error",
+        ]
+        |
+        None
+    ) = Field(
+        default=None,
+        description=(
+            "Final status of the entire LangGraph execution."
+        ),
+        examples=["success"],
+    )
+
+    # 전체 LangGraph trace를 시작한 UTC 시각입니다.
+    #
+    # ISO 8601 문자열 예:
+    #
+    # "2026-07-10T01:12:30.120000+00:00"
+    trace_started_at: str | None = Field(
+        default=None,
+        description=(
+            "UTC start time of the entire trace "
+            "in ISO 8601 format."
+        ),
+        examples=[
+            "2026-07-10T01:12:30.120000+00:00"
+        ],
+    )
+
+    # 전체 LangGraph trace가 종료된 UTC 시각입니다.
+    #
+    # graph 실행이 끝난 뒤
+    # finalize_trace()에서 저장합니다.
+    trace_finished_at: str | None = Field(
+        default=None,
+        description=(
+            "UTC finish time of the entire trace "
+            "in ISO 8601 format."
+        ),
+        examples=[
+            "2026-07-10T01:12:30.979000+00:00"
+        ],
+    )
+
+    # 전체 LangGraph workflow 실행 시간입니다.
+    #
+    # 단위:
+    #
+    # millisecond
+    #
+    # ge=0:
+    #   실행 시간은 음수가 될 수 없습니다.
+    trace_duration_ms: (
+        float
+        |
+        None
+    ) = Field(
+        default=None,
+        ge=0.0,
+        description=(
+            "Total LangGraph execution duration "
+            "in milliseconds."
+        ),
+        examples=[859.34],
+    )
+
+    # 실제 LangGraph fallback 경로가
+    # 한 번이라도 사용됐는지 나타냅니다.
+    #
+    # 주의:
+    #
+    # intent_source == "fallback"
+    #
+    # 과
+    #
+    # fallback_occurred == True
+    #
+    # 는 서로 다른 의미입니다.
+    #
+    # intent_source == "fallback":
+    #   OpenAI intent 분류 실패 후
+    #   rule-based classifier를 사용했다는 의미
+    #
+    # fallback_occurred == True:
+    #   LangGraph가 실제 fallback route 또는
+    #   fallback answer node를 실행했다는 의미
+    fallback_occurred: bool = Field(
+        default=False,
+        description=(
+            "Whether the LangGraph workflow "
+            "used an actual fallback route."
+        ),
+    )
+
+    # 요청 하나에서 실행된
+    # 모든 node와 route trace event입니다.
+    #
+    # 실행 순서 예:
+    #
+    # 1.
+    # validate_question
+    #
+    # 2.
+    # route_after_validation
+    #
+    # 3.
+    # classify_intent
+    #
+    # 4.
+    # route_after_classification
+    #
+    # 5.
+    # call_failure_prediction
+    #
+    # 각 event는 TraceEventResponse schema로
+    # FastAPI와 Swagger에서 검증·문서화됩니다.
+    trace_events: list[
+        TraceEventResponse
+    ] = Field(
+        default_factory=list,
+        description=(
+            "Ordered LangGraph node and route trace events."
+        ),
     )

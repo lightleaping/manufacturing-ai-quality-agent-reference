@@ -1059,3 +1059,994 @@ def test_run_failure_agent_graph_passes_chat_history_through_workflow(
     )
 
     assert result["errors"] == []
+
+# =============================================================================
+# Day 16 - LangGraph Trace 통합 테스트
+# =============================================================================
+
+
+def test_run_failure_agent_graph_records_dataset_schema_trace(
+    monkeypatch,
+):
+    """
+    dataset_schema_query 전체 workflow에서
+    node와 route trace가 실제 실행 순서대로 기록되는지 검증합니다.
+
+    예상 실행 흐름
+    -------------
+    1. validate_question
+
+    2. route_after_validation
+
+        selected_route:
+            classify
+
+    3. classify_intent
+
+        intent:
+            dataset_schema_query
+
+    4. route_after_classification
+
+        selected_route:
+            dataset_schema
+
+    5. build_dataset_schema_answer
+
+
+    최종 trace 상태
+    ----------------
+    fallback 경로를 사용하지 않았고
+    error도 없으므로:
+
+        trace_status
+
+        =
+
+        "success"
+    """
+
+    def fake_classify_intent(
+        question: str,
+        *,
+        chat_history=None,
+    ) -> IntentClassificationResult:
+        """
+        실제 OpenAI API 대신
+        dataset_schema_query 결과를 반환합니다.
+        """
+
+        return IntentClassificationResult(
+            intent="dataset_schema_query",
+            confidence=0.9,
+            reason=(
+                "사용자가 AI4I 데이터셋 "
+                "schema를 질문했습니다."
+            ),
+            source="openai",
+            raw_response=None,
+            error=None,
+        )
+
+    monkeypatch.setattr(
+        failure_agent_graph,
+        "classify_intent",
+        fake_classify_intent,
+    )
+
+    result = run_failure_agent_graph(
+        question=(
+            "AI4I 데이터셋의 "
+            "feature와 target은 뭐야?"
+        ),
+    )
+
+    # -----------------------------------------
+    # 전체 trace 요약 검증
+    # -----------------------------------------
+
+    # 요청 하나를 구분하는
+    # UUID 기반 trace_id가 존재해야 합니다.
+    assert isinstance(
+        result["trace_id"],
+        str,
+    )
+
+    assert len(
+        result["trace_id"]
+    ) == 32
+
+    # workflow가 완료됐으므로
+    # 더 이상 running 상태가 아니어야 합니다.
+    assert (
+        result["trace_status"]
+        ==
+        "success"
+    )
+
+    # dataset schema 경로는
+    # fallback을 사용하지 않습니다.
+    assert (
+        result["fallback_occurred"]
+        is False
+    )
+
+    # 전체 trace 시작·종료 시각이
+    # 모두 존재해야 합니다.
+    assert isinstance(
+        result["trace_started_at"],
+        str,
+    )
+
+    assert isinstance(
+        result["trace_finished_at"],
+        str,
+    )
+
+    # 전체 workflow 실행 시간은
+    # 0 이상의 float이어야 합니다.
+    assert isinstance(
+        result["trace_duration_ms"],
+        float,
+    )
+
+    assert (
+        result["trace_duration_ms"]
+        >=
+        0.0
+    )
+
+    # -----------------------------------------
+    # trace event 실행 순서 검증
+    # -----------------------------------------
+
+    trace_events = result[
+        "trace_events"
+    ]
+
+    assert (
+        len(trace_events)
+        ==
+        5
+    )
+
+    event_names = [
+        event["event_name"]
+        for event in trace_events
+    ]
+
+    assert event_names == [
+        "validate_question",
+        "route_after_validation",
+        "classify_intent",
+        "route_after_classification",
+        "build_dataset_schema_answer",
+    ]
+
+    # event sequence는
+    # 1부터 순서대로 증가해야 합니다.
+    assert [
+        event["sequence"]
+        for event in trace_events
+    ] == [
+        1,
+        2,
+        3,
+        4,
+        5,
+    ]
+
+    # node와 route 종류도
+    # 실제 workflow 구조와 일치해야 합니다.
+    assert [
+        event["event_type"]
+        for event in trace_events
+    ] == [
+        "node",
+        "route",
+        "node",
+        "route",
+        "node",
+    ]
+
+    # -----------------------------------------
+    # route metadata 검증
+    # -----------------------------------------
+
+    validation_route_event = (
+        trace_events[1]
+    )
+
+    assert (
+        validation_route_event[
+            "metadata"
+        ][
+            "selected_route"
+        ]
+        ==
+        "classify"
+    )
+
+    classification_route_event = (
+        trace_events[3]
+    )
+
+    assert (
+        classification_route_event[
+            "metadata"
+        ][
+            "selected_route"
+        ]
+        ==
+        "dataset_schema"
+    )
+
+    # -----------------------------------------
+    # intent metadata 검증
+    # -----------------------------------------
+
+    intent_event = (
+        trace_events[2]
+    )
+
+    assert (
+        intent_event["metadata"]["intent"]
+        ==
+        "dataset_schema_query"
+    )
+
+    assert (
+        intent_event[
+            "metadata"
+        ][
+            "intent_source"
+        ]
+        ==
+        "openai"
+    )
+
+    assert (
+        intent_event[
+            "metadata"
+        ][
+            "confidence"
+        ]
+        ==
+        0.9
+    )
+
+
+def test_run_failure_agent_graph_records_successful_prediction_trace(
+    monkeypatch,
+):
+    """
+    정상 failure prediction workflow의
+    전체 trace 순서와 prediction metadata를 검증합니다.
+
+    예상 흐름
+    ---------
+    validate_question
+
+    -> route_after_validation
+
+    -> classify_intent
+
+    -> route_after_classification
+
+    -> call_failure_prediction
+
+    -> route_after_prediction
+
+    -> build_final_answer
+    """
+
+    def fake_classify_intent(
+        question: str,
+        *,
+        chat_history=None,
+    ) -> IntentClassificationResult:
+        """
+        실제 OpenAI 호출 없이
+        failure_prediction intent를 반환합니다.
+        """
+
+        return IntentClassificationResult(
+            intent="failure_prediction",
+            confidence=0.95,
+            reason=(
+                "사용자가 설비 고장 위험 "
+                "예측을 요청했습니다."
+            ),
+            source="openai",
+            raw_response=None,
+            error=None,
+        )
+
+    def fake_run_failure_prediction_service(
+        raw_sample,
+        include_shap=True,
+        include_global_importance=True,
+    ):
+        """
+        실제 PyTorch 모델과 SHAP을 실행하지 않고
+        정상 prediction 결과를 반환합니다.
+        """
+
+        return {
+            "prediction": 1,
+            "probability": 0.9929,
+            "threshold": 0.7,
+            "risk_level": "HIGH",
+            "recommended_action": (
+                "고장 위험이 높습니다. "
+                "설비 점검을 권장합니다."
+            ),
+            "evidence": [
+                {
+                    "evidence_id": (
+                        "prediction_summary_001"
+                    ),
+                    "evidence_type": (
+                        "prediction_summary"
+                    ),
+                    "source": (
+                        "model_prediction"
+                    ),
+                    "title": (
+                        "모델 예측 요약"
+                    ),
+                    "summary": (
+                        "고장 위험이 높게 "
+                        "예측되었습니다."
+                    ),
+                    "severity": "HIGH",
+                }
+            ],
+            "answer": (
+                "고장 위험이 높습니다."
+            ),
+            "warnings": [],
+            "errors": [],
+            "limitations": [],
+        }
+
+    monkeypatch.setattr(
+        failure_agent_graph,
+        "classify_intent",
+        fake_classify_intent,
+    )
+
+    monkeypatch.setattr(
+        failure_agent_graph,
+        "_run_failure_prediction_service",
+        fake_run_failure_prediction_service,
+    )
+
+    raw_sample = {
+        "air_temperature": 303.0,
+        "process_temperature": 312.5,
+        "rotational_speed": 1380.0,
+        "torque": 62.0,
+        "tool_wear": 220.0,
+        "type": "L",
+    }
+
+    result = run_failure_agent_graph(
+        question=(
+            "이 설비 조건이면 "
+            "고장 위험이 높아?"
+        ),
+        raw_sample=raw_sample,
+    )
+
+    # 정상 prediction 경로이므로
+    # 전체 trace는 success입니다.
+    assert (
+        result["trace_status"]
+        ==
+        "success"
+    )
+
+    assert (
+        result["fallback_occurred"]
+        is False
+    )
+
+    trace_events = result[
+        "trace_events"
+    ]
+
+    # 정상 prediction 경로에서는
+    # node 4개 + route 3개가 실행됩니다.
+    assert (
+        len(trace_events)
+        ==
+        7
+    )
+
+    assert [
+        event["event_name"]
+        for event in trace_events
+    ] == [
+        "validate_question",
+        "route_after_validation",
+        "classify_intent",
+        "route_after_classification",
+        "call_failure_prediction",
+        "route_after_prediction",
+        "build_final_answer",
+    ]
+
+    prediction_event = (
+        trace_events[4]
+    )
+
+    # prediction service가 성공했으므로
+    # node event도 success여야 합니다.
+    assert (
+        prediction_event["status"]
+        ==
+        "success"
+    )
+
+    assert (
+        prediction_event[
+            "metadata"
+        ][
+            "raw_sample_provided"
+        ]
+        is True
+    )
+
+    assert (
+        prediction_event[
+            "metadata"
+        ][
+            "prediction_succeeded"
+        ]
+        is True
+    )
+
+    assert (
+        prediction_event[
+            "metadata"
+        ][
+            "prediction"
+        ]
+        ==
+        1
+    )
+
+    assert (
+        prediction_event[
+            "metadata"
+        ][
+            "risk_level"
+        ]
+        ==
+        "HIGH"
+    )
+
+    assert (
+        prediction_event[
+            "metadata"
+        ][
+            "evidence_count"
+        ]
+        ==
+        1
+    )
+
+    # prediction 이후에는
+    # final route를 선택해야 합니다.
+    prediction_route_event = (
+        trace_events[5]
+    )
+
+    assert (
+        prediction_route_event[
+            "metadata"
+        ][
+            "selected_route"
+        ]
+        ==
+        "final"
+    )
+
+
+def test_run_failure_agent_graph_records_unknown_intent_fallback_trace(
+    monkeypatch,
+):
+    """
+    unknown intent가 실제 fallback 경로로 이동할 때
+    route와 fallback node가 올바르게 기록되는지 검증합니다.
+
+    예상 흐름
+    ---------
+    validate_question
+
+    -> route_after_validation
+
+    -> classify_intent
+
+    -> route_after_classification
+
+        selected_route:
+            fallback
+
+    -> build_fallback_answer
+
+
+    최종 상태
+    ---------
+    trace_status:
+
+        fallback
+
+    fallback_occurred:
+
+        True
+    """
+
+    def fake_classify_intent(
+        question: str,
+        *,
+        chat_history=None,
+    ) -> IntentClassificationResult:
+        return IntentClassificationResult(
+            intent="unknown",
+            confidence=0.3,
+            reason=(
+                "현재 지원하지 않는 "
+                "질문입니다."
+            ),
+            source="openai",
+            raw_response=None,
+            error=None,
+        )
+
+    monkeypatch.setattr(
+        failure_agent_graph,
+        "classify_intent",
+        fake_classify_intent,
+    )
+
+    result = run_failure_agent_graph(
+        question=(
+            "오늘 점심 메뉴 추천해줘."
+        ),
+    )
+
+    assert (
+        result["trace_status"]
+        ==
+        "fallback"
+    )
+
+    assert (
+        result["fallback_occurred"]
+        is True
+    )
+
+    # unknown intent 자체는
+    # 시스템 오류가 아니므로
+    # errors는 비어 있습니다.
+    assert (
+        result["errors"]
+        ==
+        []
+    )
+
+    trace_events = result[
+        "trace_events"
+    ]
+
+    assert (
+        len(trace_events)
+        ==
+        5
+    )
+
+    assert [
+        event["event_name"]
+        for event in trace_events
+    ] == [
+        "validate_question",
+        "route_after_validation",
+        "classify_intent",
+        "route_after_classification",
+        "build_fallback_answer",
+    ]
+
+    classification_route_event = (
+        trace_events[3]
+    )
+
+    assert (
+        classification_route_event[
+            "status"
+        ]
+        ==
+        "fallback"
+    )
+
+    assert (
+        classification_route_event[
+            "metadata"
+        ][
+            "selected_route"
+        ]
+        ==
+        "fallback"
+    )
+
+    fallback_answer_event = (
+        trace_events[4]
+    )
+
+    assert (
+        fallback_answer_event[
+            "status"
+        ]
+        ==
+        "fallback"
+    )
+
+    assert (
+        fallback_answer_event[
+            "metadata"
+        ][
+            "intent"
+        ]
+        ==
+        "unknown"
+    )
+
+    assert (
+        fallback_answer_event[
+            "metadata"
+        ][
+            "answer_created"
+        ]
+        is True
+    )
+
+
+def test_run_failure_agent_graph_records_missing_raw_sample_fallback_trace(
+    monkeypatch,
+):
+    """
+    failure_prediction intent이지만
+    raw_sample이 없는 경우의 trace를 검증합니다.
+
+    이 경우:
+
+    intent 분류:
+
+        성공
+
+    prediction:
+
+        raw_sample 부족으로 실패
+
+    route:
+
+        fallback
+
+    fallback answer:
+
+        생성 성공
+
+    최종 trace:
+
+        fallback
+    """
+
+    def fake_classify_intent(
+        question: str,
+        *,
+        chat_history=None,
+    ) -> IntentClassificationResult:
+        return IntentClassificationResult(
+            intent="failure_prediction",
+            confidence=0.95,
+            reason=(
+                "사용자가 고장 위험 "
+                "예측을 요청했습니다."
+            ),
+            source="openai",
+            raw_response=None,
+            error=None,
+        )
+
+    monkeypatch.setattr(
+        failure_agent_graph,
+        "classify_intent",
+        fake_classify_intent,
+    )
+
+    result = run_failure_agent_graph(
+        question=(
+            "그 조건으로 고장 위험을 "
+            "다시 예측해줘."
+        ),
+    )
+
+    assert (
+        result["trace_status"]
+        ==
+        "fallback"
+    )
+
+    assert (
+        result["fallback_occurred"]
+        is True
+    )
+
+    assert (
+        len(result["errors"])
+        ==
+        1
+    )
+
+    trace_events = result[
+        "trace_events"
+    ]
+
+    assert (
+        len(trace_events)
+        ==
+        7
+    )
+
+    assert [
+        event["event_name"]
+        for event in trace_events
+    ] == [
+        "validate_question",
+        "route_after_validation",
+        "classify_intent",
+        "route_after_classification",
+        "call_failure_prediction",
+        "route_after_prediction",
+        "build_fallback_answer",
+    ]
+
+    prediction_event = (
+        trace_events[4]
+    )
+
+    # raw_sample 부족으로
+    # errors가 한 개 추가됐으므로
+    # prediction node 상태는 error입니다.
+    assert (
+        prediction_event["status"]
+        ==
+        "error"
+    )
+
+    assert (
+        prediction_event[
+            "metadata"
+        ][
+            "raw_sample_provided"
+        ]
+        is False
+    )
+
+    assert (
+        prediction_event[
+            "metadata"
+        ][
+            "prediction_succeeded"
+        ]
+        is False
+    )
+
+    assert (
+        prediction_event[
+            "metadata"
+        ][
+            "prediction"
+        ]
+        is None
+    )
+
+    assert (
+        prediction_event[
+            "metadata"
+        ][
+            "risk_level"
+        ]
+        ==
+        "UNKNOWN"
+    )
+
+    assert (
+        prediction_event[
+            "metadata"
+        ][
+            "errors_added"
+        ]
+        ==
+        1
+    )
+
+    # prediction 이후 route는
+    # fallback을 선택해야 합니다.
+    prediction_route_event = (
+        trace_events[5]
+    )
+
+    assert (
+        prediction_route_event[
+            "status"
+        ]
+        ==
+        "fallback"
+    )
+
+    assert (
+        prediction_route_event[
+            "metadata"
+        ][
+            "selected_route"
+        ]
+        ==
+        "fallback"
+    )
+
+    fallback_answer_event = (
+        trace_events[6]
+    )
+
+    assert (
+        fallback_answer_event[
+            "status"
+        ]
+        ==
+        "fallback"
+    )
+
+    assert (
+        fallback_answer_event[
+            "metadata"
+        ][
+            "error_count"
+        ]
+        ==
+        1
+    )
+
+
+def test_run_failure_agent_graph_records_empty_question_fallback_trace():
+    """
+    빈 question이 validation 단계에서 발견될 때
+    intent classifier를 실행하지 않고
+    바로 fallback으로 이동하는지 검증합니다.
+
+    예상 흐름
+    ---------
+    1. validate_question
+
+        status:
+            error
+
+    2. route_after_validation
+
+        selected_route:
+            fallback
+
+    3. build_fallback_answer
+
+        status:
+            fallback
+
+
+    실행되면 안 되는 단계
+    ---------------------
+    classify_intent
+
+    call_failure_prediction
+    """
+
+    result = run_failure_agent_graph(
+        question="   ",
+    )
+
+    assert (
+        result["trace_status"]
+        ==
+        "fallback"
+    )
+
+    assert (
+        result["fallback_occurred"]
+        is True
+    )
+
+    assert (
+        len(result["errors"])
+        ==
+        1
+    )
+
+    trace_events = result[
+        "trace_events"
+    ]
+
+    assert (
+        len(trace_events)
+        ==
+        3
+    )
+
+    assert [
+        event["event_name"]
+        for event in trace_events
+    ] == [
+        "validate_question",
+        "route_after_validation",
+        "build_fallback_answer",
+    ]
+
+    validation_event = (
+        trace_events[0]
+    )
+
+    assert (
+        validation_event["status"]
+        ==
+        "error"
+    )
+
+    assert (
+        validation_event[
+            "metadata"
+        ][
+            "question_valid"
+        ]
+        is False
+    )
+
+    assert (
+        validation_event[
+            "metadata"
+        ][
+            "errors_added"
+        ]
+        ==
+        1
+    )
+
+    validation_route_event = (
+        trace_events[1]
+    )
+
+    assert (
+        validation_route_event[
+            "status"
+        ]
+        ==
+        "fallback"
+    )
+
+    assert (
+        validation_route_event[
+            "metadata"
+        ][
+            "selected_route"
+        ]
+        ==
+        "fallback"
+    )
+
+    # validation 실패 후에는
+    # intent 분류 node가 실행되지 않아야 합니다.
+    assert (
+        "classify_intent"
+        not in [
+            event["event_name"]
+            for event in trace_events
+        ]
+    )

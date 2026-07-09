@@ -12,8 +12,8 @@ Day 13 - LangGraph 기반 Failure Agent workflow
 -> classify_intent_node
 -> intent에 따라 분기
    - failure_prediction     -> call_failure_prediction_node
-   - dataset_schema_query    -> build_dataset_schema_answer_node
-   - unknown                 -> build_fallback_answer_node
+   - dataset_schema_query   -> build_dataset_schema_answer_node
+   - unknown                -> build_fallback_answer_node
 -> 최종 answer 반환
 
 기존 manufacturing-mcp-agent와의 차이
@@ -32,6 +32,130 @@ Day 13 - LangGraph 기반 Failure Agent workflow
     -> LangGraph AgentState 기반 workflow
     -> Day 12 failure_agent_service 재사용
 
+Day 16 확장
+-----------
+Day 16에서는 기존 LangGraph business logic을 유지하면서
+내부 구조화 trace를 workflow에 연결합니다.
+
+기존에는 최종 결과만 확인할 수 있었습니다.
+
+예:
+
+    intent
+
+    confidence
+
+    prediction
+
+    probability
+
+    risk_level
+
+    warnings
+
+    errors
+
+Day 16에서는 아래 실행 과정도 함께 기록합니다.
+
+    node 실행 순서
+
+    node 시작 시각
+
+    node 종료 시각
+
+    node 실행 시간
+
+    route 선택 결과
+
+    intent metadata
+
+    prediction 성공 여부
+
+    fallback 발생 여부
+
+    전체 workflow 실행 상태
+
+중요한 설계
+-----------
+기존 business node 안에
+시간 측정 코드를 직접 반복해서 넣지 않습니다.
+
+기존:
+
+    validate_question_node
+
+    classify_intent_node
+
+    call_failure_prediction_node
+
+위 node는 계속 자신의 핵심 기능만 담당합니다.
+
+새 trace wrapper:
+
+    traced_validate_question_node
+
+    traced_classify_intent_node
+
+    traced_call_failure_prediction_node
+
+위 wrapper가 기존 node를 실행하면서
+시작 시각, 종료 시각, duration, metadata를 기록합니다.
+
+routing도 기존 route 함수를 삭제하지 않습니다.
+
+기존:
+
+    route_after_validation
+
+    route_after_classification
+
+    route_after_prediction
+
+위 함수는 계속 순수하게
+다음 route 문자열을 반환합니다.
+
+새 route trace node:
+
+    trace_route_after_validation_node
+
+    trace_route_after_classification_node
+
+    trace_route_after_prediction_node
+
+위 node가 기존 route 함수를 실행하고,
+선택된 route를 trace event와 AgentState에 저장합니다.
+
+이후 conditional edge는:
+
+    route_by_selected_route
+
+함수를 사용하여
+이미 저장된 route를 읽습니다.
+
+이 구조를 사용하는 이유
+-----------------------
+routing 함수 안에서 trace_events를 직접 수정한 뒤
+그 routing 함수 자체를 add_conditional_edges()에 바로 연결하면,
+routing 함수의 핵심 책임인 "경로 선택"과
+state 변경 책임이 섞일 수 있습니다.
+
+Day 16에서는:
+
+    route 판단
+
+    trace 기록
+
+    AgentState 저장
+
+을 일반 LangGraph node 안에서 수행합니다.
+
+그 다음 conditional edge는
+저장된 selected_route만 읽습니다.
+
+따라서 routing 결과가
+최종 AgentState의 trace_events에
+명확하게 남습니다.
+
 중요한 설계 원칙
 ----------------
 1. LLM은 최종 고장 예측을 하지 않습니다.
@@ -39,10 +163,13 @@ Day 13 - LangGraph 기반 Failure Agent workflow
 3. 실제 prediction은 Day 12의 failure_agent_service가 담당합니다.
 4. raw_sample이 없으면 억지로 예측하지 않고 fallback answer를 반환합니다.
 5. workflow 중 오류는 errors에 누적하고, 부가 기능 실패는 warnings에 누적합니다.
+6. trace는 business logic을 변경하지 않고 실행 과정을 관찰합니다.
+7. trace에는 전체 raw_sample이나 전체 chat_history를 자동 저장하지 않습니다.
 """
 
 from __future__ import annotations
 
+from time import perf_counter
 from typing import Any, Mapping
 
 from langgraph.graph import END, START, StateGraph
@@ -56,6 +183,11 @@ from src.agent.state import (
     create_initial_agent_state,
     has_errors,
     has_raw_sample,
+)
+from src.agent.trace import (
+    finalize_trace,
+    run_traced_node,
+    run_traced_route,
 )
 
 
@@ -368,7 +500,10 @@ def build_dataset_schema_answer_node(state: AgentState) -> AgentState:
                     "Type",
                 ],
                 "target": "Machine failure",
-                "excluded_columns": ["UDI", "Product ID"],
+                "excluded_columns": [
+                    "UDI",
+                    "Product ID",
+                ],
             },
         }
     ]
@@ -395,7 +530,10 @@ def build_fallback_answer_node(state: AgentState) -> AgentState:
         state["answer"] = (
             "요청을 처리하는 중 문제가 발생했습니다.\n\n"
             "확인된 문제:\n"
-            + "\n".join(f"- {error}" for error in errors)
+            + "\n".join(
+                f"- {error}"
+                for error in errors
+            )
             + "\n\n"
             "고장 위험을 다시 예측하려면 "
             "현재 예측에 사용할 새 raw_sample을 요청에 함께 제공해주세요."
@@ -436,9 +574,18 @@ def build_final_answer_node(state: AgentState) -> AgentState:
     if isinstance(answer, str) and answer.strip():
         return state
 
-    risk_level = state.get("risk_level", "UNKNOWN")
-    probability = state.get("probability")
-    recommended_action = state.get("recommended_action")
+    risk_level = state.get(
+        "risk_level",
+        "UNKNOWN",
+    )
+
+    probability = state.get(
+        "probability"
+    )
+
+    recommended_action = state.get(
+        "recommended_action"
+    )
 
     state["answer"] = (
         f"모델 예측 결과 risk_level={risk_level}입니다. "
@@ -473,7 +620,10 @@ def route_after_classification(state: AgentState) -> str:
     if has_errors(state):
         return "fallback"
 
-    intent = state.get("intent", "unknown")
+    intent = state.get(
+        "intent",
+        "unknown",
+    )
 
     if intent == "failure_prediction":
         return "failure_prediction"
@@ -498,6 +648,624 @@ def route_after_prediction(state: AgentState) -> str:
     return "final"
 
 
+# ---------------------------------------------------------------------
+# Day 16 - Trace metadata builder
+# ---------------------------------------------------------------------
+
+
+def build_validation_trace_metadata(
+    state: AgentState,
+) -> dict[str, Any]:
+    """
+    validate_question node의 trace metadata를 만듭니다.
+
+    trace에는 전체 question 내용을 저장하지 않습니다.
+
+    대신 아래 요약값만 저장합니다.
+
+        question_valid
+
+        question_length
+
+        error_count
+
+    전체 질문을 trace에 자동 저장하지 않는 이유
+    -----------------------------------------
+    사용자 질문에는 개인정보,
+    기업 정보,
+    생산 조건 등이 포함될 수 있습니다.
+
+    따라서 기본 trace에는
+    질문 원문 대신 길이와 검증 결과만 저장합니다.
+    """
+
+    question = state.get(
+        "question",
+        "",
+    )
+
+    question_length = (
+        len(question)
+        if isinstance(question, str)
+        else 0
+    )
+
+    return {
+        "question_valid": (
+            isinstance(question, str)
+            and bool(question.strip())
+            and not has_errors(state)
+        ),
+        "question_length": (
+            question_length
+        ),
+        "error_count": len(
+            state.get(
+                "errors",
+                [],
+            )
+        ),
+    }
+
+
+def build_intent_trace_metadata(
+    state: AgentState,
+) -> dict[str, Any]:
+    """
+    classify_intent node의 trace metadata를 만듭니다.
+
+    저장 정보:
+
+        intent
+
+        intent_source
+
+        confidence
+
+        warning_count
+
+    intent_raw_response는
+    기본 trace metadata에 저장하지 않습니다.
+
+    OpenAI 원본 응답은 길 수 있고,
+    불필요한 입력 내용이 포함될 수 있기 때문입니다.
+    """
+
+    return {
+        "intent": state.get(
+            "intent"
+        ),
+        "intent_source": state.get(
+            "intent_source"
+        ),
+        "confidence": state.get(
+            "confidence"
+        ),
+        "warning_count": len(
+            state.get(
+                "warnings",
+                [],
+            )
+        ),
+    }
+
+
+def build_prediction_trace_metadata(
+    state: AgentState,
+) -> dict[str, Any]:
+    """
+    failure prediction node의 trace metadata를 만듭니다.
+
+    저장 정보:
+
+        raw_sample_provided
+
+        prediction_succeeded
+
+        prediction
+
+        risk_level
+
+        evidence_count
+
+        warning_count
+
+        error_count
+
+    전체 raw_sample 값은 trace에 넣지 않습니다.
+
+    trace에는 예측 성공 여부와
+    결과 요약만 저장합니다.
+    """
+
+    raw_sample = state.get(
+        "raw_sample"
+    )
+
+    prediction = state.get(
+        "prediction"
+    )
+
+    return {
+        "raw_sample_provided": (
+            isinstance(
+                raw_sample,
+                dict,
+            )
+            and len(raw_sample) > 0
+        ),
+        "prediction_succeeded": (
+            prediction in {0, 1}
+            and not has_errors(state)
+        ),
+        "prediction": prediction,
+        "risk_level": state.get(
+            "risk_level"
+        ),
+        "evidence_count": len(
+            state.get(
+                "evidence",
+                [],
+            )
+        ),
+        "warning_count": len(
+            state.get(
+                "warnings",
+                [],
+            )
+        ),
+        "error_count": len(
+            state.get(
+                "errors",
+                [],
+            )
+        ),
+    }
+
+
+def build_dataset_schema_trace_metadata(
+    state: AgentState,
+) -> dict[str, Any]:
+    """
+    dataset schema answer node의
+    trace metadata를 만듭니다.
+    """
+
+    answer = state.get(
+        "answer"
+    )
+
+    return {
+        "answer_created": (
+            isinstance(answer, str)
+            and bool(answer.strip())
+        ),
+        "evidence_count": len(
+            state.get(
+                "evidence",
+                [],
+            )
+        ),
+    }
+
+
+def build_fallback_trace_metadata(
+    state: AgentState,
+) -> dict[str, Any]:
+    """
+    fallback answer node의
+    trace metadata를 만듭니다.
+    """
+
+    answer = state.get(
+        "answer"
+    )
+
+    return {
+        "intent": state.get(
+            "intent",
+            "unknown",
+        ),
+        "error_count": len(
+            state.get(
+                "errors",
+                [],
+            )
+        ),
+        "answer_created": (
+            isinstance(answer, str)
+            and bool(answer.strip())
+        ),
+    }
+
+
+def build_final_answer_trace_metadata(
+    state: AgentState,
+) -> dict[str, Any]:
+    """
+    final answer node의
+    trace metadata를 만듭니다.
+    """
+
+    answer = state.get(
+        "answer"
+    )
+
+    return {
+        "risk_level": state.get(
+            "risk_level",
+            "UNKNOWN",
+        ),
+        "answer_created": (
+            isinstance(answer, str)
+            and bool(answer.strip())
+        ),
+    }
+
+
+def build_validation_route_metadata(
+    state: AgentState,
+    selected_route: str,
+) -> dict[str, Any]:
+    """
+    question 검증 이후 route metadata입니다.
+    """
+
+    return {
+        "has_errors": has_errors(
+            state
+        ),
+        "selected_route": (
+            selected_route
+        ),
+    }
+
+
+def build_classification_route_metadata(
+    state: AgentState,
+    selected_route: str,
+) -> dict[str, Any]:
+    """
+    intent 분류 이후 route metadata입니다.
+    """
+
+    return {
+        "intent": state.get(
+            "intent",
+            "unknown",
+        ),
+        "has_errors": has_errors(
+            state
+        ),
+        "selected_route": (
+            selected_route
+        ),
+    }
+
+
+def build_prediction_route_metadata(
+    state: AgentState,
+    selected_route: str,
+) -> dict[str, Any]:
+    """
+    prediction 이후 route metadata입니다.
+    """
+
+    return {
+        "prediction": state.get(
+            "prediction"
+        ),
+        "has_errors": has_errors(
+            state
+        ),
+        "selected_route": (
+            selected_route
+        ),
+    }
+
+
+# ---------------------------------------------------------------------
+# Day 16 - Traced node wrapper
+# ---------------------------------------------------------------------
+
+
+def traced_validate_question_node(
+    state: AgentState,
+) -> AgentState:
+    """
+    validate_question_node를 실행하면서
+    node trace event를 기록합니다.
+    """
+
+    return run_traced_node(
+        state,
+        node_name="validate_question",
+        node_function=(
+            validate_question_node
+        ),
+        metadata_builder=(
+            build_validation_trace_metadata
+        ),
+    )
+
+
+def traced_classify_intent_node(
+    state: AgentState,
+) -> AgentState:
+    """
+    classify_intent_node를 실행하면서
+    intent 결과와 실행 시간을 기록합니다.
+    """
+
+    return run_traced_node(
+        state,
+        node_name="classify_intent",
+        node_function=(
+            classify_intent_node
+        ),
+        metadata_builder=(
+            build_intent_trace_metadata
+        ),
+    )
+
+
+def traced_call_failure_prediction_node(
+    state: AgentState,
+) -> AgentState:
+    """
+    call_failure_prediction_node를 실행하면서
+    prediction 결과와 실행 시간을 기록합니다.
+    """
+
+    return run_traced_node(
+        state,
+        node_name="call_failure_prediction",
+        node_function=(
+            call_failure_prediction_node
+        ),
+        metadata_builder=(
+            build_prediction_trace_metadata
+        ),
+    )
+
+
+def traced_build_dataset_schema_answer_node(
+    state: AgentState,
+) -> AgentState:
+    """
+    dataset schema answer node 실행을 기록합니다.
+    """
+
+    return run_traced_node(
+        state,
+        node_name=(
+            "build_dataset_schema_answer"
+        ),
+        node_function=(
+            build_dataset_schema_answer_node
+        ),
+        metadata_builder=(
+            build_dataset_schema_trace_metadata
+        ),
+    )
+
+
+def traced_build_fallback_answer_node(
+    state: AgentState,
+) -> AgentState:
+    """
+    fallback answer node 실행을 기록합니다.
+
+    is_fallback_node=True이므로:
+
+        event status
+
+        =
+
+        "fallback"
+
+    로 기록되고:
+
+        fallback_occurred
+
+        =
+
+        True
+
+    로 변경됩니다.
+    """
+
+    return run_traced_node(
+        state,
+        node_name="build_fallback_answer",
+        node_function=(
+            build_fallback_answer_node
+        ),
+        metadata_builder=(
+            build_fallback_trace_metadata
+        ),
+        is_fallback_node=True,
+    )
+
+
+def traced_build_final_answer_node(
+    state: AgentState,
+) -> AgentState:
+    """
+    final answer node 실행을 기록합니다.
+    """
+
+    return run_traced_node(
+        state,
+        node_name="build_final_answer",
+        node_function=(
+            build_final_answer_node
+        ),
+        metadata_builder=(
+            build_final_answer_trace_metadata
+        ),
+    )
+
+
+# ---------------------------------------------------------------------
+# Day 16 - Route trace node
+# ---------------------------------------------------------------------
+
+
+def trace_route_after_validation_node(
+    state: AgentState,
+) -> AgentState:
+    """
+    validation 이후 선택된 route를 기록합니다.
+
+    처리 흐름:
+
+        route_after_validation()
+
+        ↓
+
+        selected_route 계산
+
+        ↓
+
+        route trace event 추가
+
+        ↓
+
+        state["selected_route"] 저장
+    """
+
+    selected_route = run_traced_route(
+        state,
+        route_name=(
+            "route_after_validation"
+        ),
+        route_function=(
+            route_after_validation
+        ),
+        metadata_builder=(
+            build_validation_route_metadata
+        ),
+    )
+
+    state["selected_route"] = (
+        selected_route
+    )
+
+    return state
+
+
+def trace_route_after_classification_node(
+    state: AgentState,
+) -> AgentState:
+    """
+    intent 분류 이후 선택된 route를 기록합니다.
+    """
+
+    selected_route = run_traced_route(
+        state,
+        route_name=(
+            "route_after_classification"
+        ),
+        route_function=(
+            route_after_classification
+        ),
+        metadata_builder=(
+            build_classification_route_metadata
+        ),
+    )
+
+    state["selected_route"] = (
+        selected_route
+    )
+
+    return state
+
+
+def trace_route_after_prediction_node(
+    state: AgentState,
+) -> AgentState:
+    """
+    prediction 이후 선택된 route를 기록합니다.
+    """
+
+    selected_route = run_traced_route(
+        state,
+        route_name=(
+            "route_after_prediction"
+        ),
+        route_function=(
+            route_after_prediction
+        ),
+        metadata_builder=(
+            build_prediction_route_metadata
+        ),
+    )
+
+    state["selected_route"] = (
+        selected_route
+    )
+
+    return state
+
+
+def route_by_selected_route(
+    state: AgentState,
+) -> str:
+    """
+    이미 계산해 둔 selected_route를 반환합니다.
+
+    기존에는 conditional edge가
+    직접 아래 함수를 실행했습니다.
+
+        route_after_validation
+
+        route_after_classification
+
+        route_after_prediction
+
+    Day 16에서는 먼저 route trace node가
+    route를 계산하고 trace event를 저장합니다.
+
+    이후 conditional edge는
+    이 함수로 저장된 route만 읽습니다.
+
+    왜 route를 다시 계산하지 않는가?
+    -------------------------------
+    route 함수를 두 번 실행하면
+    현재 구조에서는 같은 결과가 나오더라도
+    불필요한 중복 호출이 발생합니다.
+
+    한 번 계산한 route를 저장해두면:
+
+        실제 이동 경로
+
+        trace에 기록된 경로
+
+    가 같은 값을 사용합니다.
+    """
+
+    selected_route = state.get(
+        "selected_route"
+    )
+
+    if (
+        isinstance(
+            selected_route,
+            str,
+        )
+        and selected_route
+    ):
+        return selected_route
+
+    # selected_route가 없는 것은
+    # 정상 workflow에서는 발생하지 않아야 합니다.
+    #
+    # 하지만 예외적인 부분 state에서도
+    # 안전한 fallback 경로를 반환합니다.
+    return "fallback"
+
+
 def build_failure_agent_graph():
     """
     LangGraph workflow를 생성하고 compile합니다.
@@ -509,60 +1277,204 @@ def build_failure_agent_graph():
     3. add_edge() 또는 add_conditional_edges()로 흐름 연결
     4. compile()로 실행 가능한 graph 생성
 
+    Day 16 변경
+    -----------
+    기존 business node 대신
+    traced wrapper를 graph node로 등록합니다.
+
+    예:
+
+        기존:
+
+        validate_question_node
+
+        변경:
+
+        traced_validate_question_node
+
+
+    routing도 아래 구조로 변경합니다.
+
+        traced business node
+
+        ↓
+
+        route trace node
+
+        ↓
+
+        selected_route 저장
+
+        ↓
+
+        conditional edge
+
+        ↓
+
+        다음 business node
+
     Returns
     -------
     CompiledStateGraph
         invoke()로 실행할 수 있는 LangGraph workflow입니다.
     """
 
-    graph_builder = StateGraph(AgentState)
+    graph_builder = StateGraph(
+        AgentState
+    )
 
-    # node 등록
-    graph_builder.add_node("validate_question", validate_question_node)
-    graph_builder.add_node("classify_intent", classify_intent_node)
-    graph_builder.add_node("call_failure_prediction", call_failure_prediction_node)
-    graph_builder.add_node("build_dataset_schema_answer", build_dataset_schema_answer_node)
-    graph_builder.add_node("build_fallback_answer", build_fallback_answer_node)
-    graph_builder.add_node("build_final_answer", build_final_answer_node)
+    # -------------------------------------------------
+    # 기존 business node 이름은 유지합니다.
+    #
+    # 단, 실제 등록 함수는 traced wrapper입니다.
+    #
+    # graph 시각화나 실행 결과에서는
+    # 기존 node 이름을 계속 사용할 수 있습니다.
+    # -------------------------------------------------
+
+    graph_builder.add_node(
+        "validate_question",
+        traced_validate_question_node,
+    )
+
+    graph_builder.add_node(
+        "classify_intent",
+        traced_classify_intent_node,
+    )
+
+    graph_builder.add_node(
+        "call_failure_prediction",
+        traced_call_failure_prediction_node,
+    )
+
+    graph_builder.add_node(
+        "build_dataset_schema_answer",
+        traced_build_dataset_schema_answer_node,
+    )
+
+    graph_builder.add_node(
+        "build_fallback_answer",
+        traced_build_fallback_answer_node,
+    )
+
+    graph_builder.add_node(
+        "build_final_answer",
+        traced_build_final_answer_node,
+    )
+
+    # Day 16:
+    # route 판단과 trace 기록을 담당하는
+    # 별도 node를 등록합니다.
+
+    graph_builder.add_node(
+        "trace_route_after_validation",
+        trace_route_after_validation_node,
+    )
+
+    graph_builder.add_node(
+        "trace_route_after_classification",
+        trace_route_after_classification_node,
+    )
+
+    graph_builder.add_node(
+        "trace_route_after_prediction",
+        trace_route_after_prediction_node,
+    )
 
     # 시작점 연결
-    graph_builder.add_edge(START, "validate_question")
-
-    # question 검증 결과에 따라 분기
-    graph_builder.add_conditional_edges(
+    graph_builder.add_edge(
+        START,
         "validate_question",
-        route_after_validation,
+    )
+
+    # 기존:
+    #
+    # validate_question
+    # -> conditional edge
+    #
+    # Day 16:
+    #
+    # validate_question
+    # -> route trace node
+    # -> conditional edge
+
+    graph_builder.add_edge(
+        "validate_question",
+        "trace_route_after_validation",
+    )
+
+    graph_builder.add_conditional_edges(
+        "trace_route_after_validation",
+        route_by_selected_route,
         {
-            "classify": "classify_intent",
-            "fallback": "build_fallback_answer",
+            "classify": (
+                "classify_intent"
+            ),
+            "fallback": (
+                "build_fallback_answer"
+            ),
         },
     )
 
-    # intent 분류 결과에 따라 분기
-    graph_builder.add_conditional_edges(
+    # intent 분류 이후 route 기록
+
+    graph_builder.add_edge(
         "classify_intent",
-        route_after_classification,
+        "trace_route_after_classification",
+    )
+
+    graph_builder.add_conditional_edges(
+        "trace_route_after_classification",
+        route_by_selected_route,
         {
-            "failure_prediction": "call_failure_prediction",
-            "dataset_schema": "build_dataset_schema_answer",
-            "fallback": "build_fallback_answer",
+            "failure_prediction": (
+                "call_failure_prediction"
+            ),
+            "dataset_schema": (
+                "build_dataset_schema_answer"
+            ),
+            "fallback": (
+                "build_fallback_answer"
+            ),
         },
     )
 
-    # prediction 결과에 따라 분기
-    graph_builder.add_conditional_edges(
+    # prediction 이후 route 기록
+
+    graph_builder.add_edge(
         "call_failure_prediction",
-        route_after_prediction,
+        "trace_route_after_prediction",
+    )
+
+    graph_builder.add_conditional_edges(
+        "trace_route_after_prediction",
+        route_by_selected_route,
         {
-            "final": "build_final_answer",
-            "fallback": "build_fallback_answer",
+            "final": (
+                "build_final_answer"
+            ),
+            "fallback": (
+                "build_fallback_answer"
+            ),
         },
     )
 
     # 종료 edge
-    graph_builder.add_edge("build_dataset_schema_answer", END)
-    graph_builder.add_edge("build_fallback_answer", END)
-    graph_builder.add_edge("build_final_answer", END)
+
+    graph_builder.add_edge(
+        "build_dataset_schema_answer",
+        END,
+    )
+
+    graph_builder.add_edge(
+        "build_fallback_answer",
+        END,
+    )
+
+    graph_builder.add_edge(
+        "build_final_answer",
+        END,
+    )
 
     return graph_builder.compile()
 
@@ -645,10 +1557,68 @@ def run_failure_agent_graph(
     해당 텍스트를 새로운 모델 입력으로 자동 사용하지 않습니다.
 
     실제 prediction은 계속 raw_sample을 사용합니다.
+
+
+    Day 16 trace 흐름
+    -----------------
+    1. graph compile
+
+    2. 전체 실행 시간 측정 시작
+
+    3. 초기 AgentState 생성
+
+    4. trace_id 생성
+
+    5. trace_started_at 생성
+
+    6. graph.invoke()
+
+    7. node와 route trace 누적
+
+    8. finalize_trace()
+
+    9. trace_finished_at 저장
+
+    10. trace_duration_ms 저장
+
+    11. trace_status 결정
+
+    12. 최종 AgentState 반환
     """
+
+    # LangGraph workflow를 생성하고 compile합니다.
+    #
+    # Day 16에서는 graph compile 시간을
+    # Agent 요청의 실제 workflow 실행 시간에
+    # 포함하지 않습니다.
+    graph = build_failure_agent_graph()
+
+    # 전체 LangGraph workflow 실행 시간을
+    # 측정하기 위한 시작값입니다.
+    #
+    # 이 값은 AgentState에 저장하지 않습니다.
+    #
+    # perf_counter() 값 자체는
+    # 외부에서 의미 있는 시각이 아니라
+    # 경과 시간 계산용 내부 값이기 때문입니다.
+    workflow_started_perf_counter = (
+        perf_counter()
+    )
 
     # FastAPI request 또는 다른 Python 코드에서 전달한 값을
     # LangGraph node들이 공유할 초기 AgentState로 변환합니다.
+    #
+    # create_initial_agent_state() 내부에서:
+    #
+    # trace_id
+    #
+    # trace_started_at
+    #
+    # trace_status
+    #
+    # trace_events
+    #
+    # 도 함께 초기화됩니다.
     initial_state = create_initial_agent_state(
         question=question,
         raw_sample=raw_sample,
@@ -665,24 +1635,55 @@ def run_failure_agent_graph(
     #
     # 이후 call_failure_prediction_node()에서
     # Day 12 prediction service에 전달합니다.
-    initial_state["include_shap"] = include_shap
+    initial_state["include_shap"] = (
+        include_shap
+    )
 
     # global permutation importance evidence를
     # 포함할지 저장합니다.
-    initial_state["include_global_importance"] = (
+    initial_state[
+        "include_global_importance"
+    ] = (
         include_global_importance
     )
 
-    # LangGraph workflow를 생성하고 compile합니다.
-    graph = build_failure_agent_graph()
-
     # 초기 AgentState를 graph에 전달하여
-    # validate -> classify -> routing -> answer 흐름을 실행합니다.
-    final_state = graph.invoke(initial_state)
+    # validate
+    #
+    # -> route trace
+    #
+    # -> classify
+    #
+    # -> route trace
+    #
+    # -> answer
+    #
+    # 흐름을 실행합니다.
+    final_state = graph.invoke(
+        initial_state
+    )
 
-    # 모든 node 실행이 끝난 최종 AgentState를 반환합니다.
+    # 모든 LangGraph node 실행이 끝났으므로
+    # 전체 trace 종료 정보를 저장합니다.
+    #
+    # 저장:
+    #
+    # trace_finished_at
+    #
+    # trace_duration_ms
+    #
+    # trace_status
+    final_state = finalize_trace(
+        final_state,
+        started_perf_counter=(
+            workflow_started_perf_counter
+        ),
+    )
+
+    # 모든 node와 route 실행이 끝난
+    # 최종 AgentState를 반환합니다.
     return final_state
-    
+
 
 def _run_failure_prediction_service(
     raw_sample: dict[str, Any],
@@ -725,8 +1726,12 @@ def _run_failure_prediction_service(
         }
     """
 
-    from src.api.failure_agent_service import run_failure_prediction_agent
-    from src.api.schemas import FailurePredictionRequest
+    from src.api.failure_agent_service import (
+        run_failure_prediction_agent,
+    )
+    from src.api.schemas import (
+        FailurePredictionRequest,
+    )
 
     request = FailurePredictionRequest(
         air_temperature=_get_sample_value(
@@ -759,14 +1764,21 @@ def _run_failure_prediction_service(
             "type",
             "Type",
         ),
-        
         include_shap=include_shap,
-        include_global_importance=include_global_importance,
+        include_global_importance=(
+            include_global_importance
+        ),
     )
 
-    response = run_failure_prediction_agent(request=request)
+    response = (
+        run_failure_prediction_agent(
+            request=request
+        )
+    )
 
-    return _response_to_dict(response)
+    return _response_to_dict(
+        response
+    )
 
 
 def _get_sample_value(
@@ -785,15 +1797,24 @@ def _get_sample_value(
     """
 
     if api_key in raw_sample:
-        return raw_sample[api_key]
+        return raw_sample[
+            api_key
+        ]
 
     if feature_key in raw_sample:
-        return raw_sample[feature_key]
+        return raw_sample[
+            feature_key
+        ]
 
-    raise KeyError(f"raw_sample에 필요한 값이 없습니다: {api_key} 또는 {feature_key}")
+    raise KeyError(
+        "raw_sample에 필요한 값이 없습니다: "
+        f"{api_key} 또는 {feature_key}"
+    )
 
 
-def _response_to_dict(response: Any) -> dict[str, Any]:
+def _response_to_dict(
+    response: Any,
+) -> dict[str, Any]:
     """
     service 응답을 dict로 변환합니다.
 
@@ -801,15 +1822,27 @@ def _response_to_dict(response: Any) -> dict[str, Any]:
     이미 dict일 수도 있으므로 방어적으로 처리합니다.
     """
 
-    if isinstance(response, dict):
+    if isinstance(
+        response,
+        dict,
+    ):
         return response
 
     # Pydantic v2
-    if hasattr(response, "model_dump"):
+    if hasattr(
+        response,
+        "model_dump",
+    ):
         return response.model_dump()
 
     # Pydantic v1
-    if hasattr(response, "dict"):
+    if hasattr(
+        response,
+        "dict",
+    ):
         return response.dict()
 
-    raise TypeError(f"지원하지 않는 response 타입입니다: {type(response).__name__}")
+    raise TypeError(
+        "지원하지 않는 response 타입입니다: "
+        f"{type(response).__name__}"
+    )

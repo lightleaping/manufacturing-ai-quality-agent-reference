@@ -626,3 +626,782 @@ def test_langgraph_query_api_rejects_too_many_history_messages():
     )
 
     assert response.status_code == 422
+
+# =============================================================================
+# Day 16 - LangGraph Trace API 테스트
+# =============================================================================
+
+
+def test_langgraph_query_api_returns_success_trace(
+    monkeypatch,
+):
+    """
+    LangGraph runner가 생성한 정상 trace가
+    FastAPI JSON response까지 전달되는지 검증합니다.
+
+    검증 흐름
+    ---------
+    fake LangGraph AgentState
+
+            │
+
+            ▼
+
+    _state_to_response()
+
+            │
+
+            ▼
+
+    LangGraphAgentQueryResponse
+
+            │
+
+            ▼
+
+    HTTP JSON response
+
+
+    검증 항목
+    ---------
+    trace_id
+
+    trace_status
+
+    trace_started_at
+
+    trace_finished_at
+
+    trace_duration_ms
+
+    fallback_occurred
+
+    trace_events
+    """
+
+    def fake_run_failure_agent_graph(
+        question,
+        raw_sample=None,
+        include_shap=True,
+        include_global_importance=True,
+        *,
+        chat_history=None,
+    ):
+        """
+        실제 OpenAI와 LangGraph workflow를 실행하지 않고
+        정상 dataset schema 결과와 trace를 반환합니다.
+        """
+
+        return {
+            "question": question,
+            "intent": "dataset_schema_query",
+            "confidence": 0.95,
+            "intent_source": "openai",
+            "intent_reason": (
+                "사용자가 AI4I 데이터셋 "
+                "schema를 질문했습니다."
+            ),
+            "answer": (
+                "AI4I 데이터셋은 "
+                "6개의 모델 입력 feature를 사용합니다."
+            ),
+            "evidence": [],
+            "warnings": [],
+            "errors": [],
+            "limitations": [],
+
+            # ---------------------------------
+            # Day 16 trace summary
+            # ---------------------------------
+
+            "trace_id": (
+                "908759dd97bd4a3eb7494b68f76f871c"
+            ),
+
+            "trace_status": "success",
+
+            "trace_started_at": (
+                "2026-07-10T01:12:30.120000+00:00"
+            ),
+
+            "trace_finished_at": (
+                "2026-07-10T01:12:30.979000+00:00"
+            ),
+
+            "trace_duration_ms": 859.34,
+
+            "fallback_occurred": False,
+
+            "trace_events": [
+                {
+                    "sequence": 1,
+                    "event_type": "node",
+                    "event_name": (
+                        "validate_question"
+                    ),
+                    "status": "success",
+                    "started_at": (
+                        "2026-07-10T01:12:30.120000+00:00"
+                    ),
+                    "finished_at": (
+                        "2026-07-10T01:12:30.121000+00:00"
+                    ),
+                    "duration_ms": 1.0,
+                    "metadata": {
+                        "question_valid": True,
+                        "question_length": 25,
+                        "error_count": 0,
+                    },
+                },
+                {
+                    "sequence": 2,
+                    "event_type": "route",
+                    "event_name": (
+                        "route_after_validation"
+                    ),
+                    "status": "success",
+                    "started_at": (
+                        "2026-07-10T01:12:30.122000+00:00"
+                    ),
+                    "finished_at": (
+                        "2026-07-10T01:12:30.123000+00:00"
+                    ),
+                    "duration_ms": 1.0,
+                    "metadata": {
+                        "selected_route": "classify",
+                    },
+                },
+            ],
+        }
+
+    monkeypatch.setattr(
+        (
+            "src.api.langgraph_agent_api."
+            "run_failure_agent_graph"
+        ),
+        fake_run_failure_agent_graph,
+    )
+
+    response = client.post(
+        "/agent/langgraph-query",
+        json={
+            "question": (
+                "AI4I 데이터셋의 "
+                "feature는 뭐야?"
+            ),
+        },
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    # -----------------------------------------
+    # 전체 trace summary 검증
+    # -----------------------------------------
+
+    assert (
+        data["trace_id"]
+        ==
+        "908759dd97bd4a3eb7494b68f76f871c"
+    )
+
+    assert (
+        data["trace_status"]
+        ==
+        "success"
+    )
+
+    assert (
+        data["trace_started_at"]
+        ==
+        "2026-07-10T01:12:30.120000+00:00"
+    )
+
+    assert (
+        data["trace_finished_at"]
+        ==
+        "2026-07-10T01:12:30.979000+00:00"
+    )
+
+    assert (
+        data["trace_duration_ms"]
+        ==
+        859.34
+    )
+
+    assert (
+        data["fallback_occurred"]
+        is False
+    )
+
+    # -----------------------------------------
+    # trace event 검증
+    # -----------------------------------------
+
+    assert (
+        len(data["trace_events"])
+        ==
+        2
+    )
+
+    first_event = (
+        data["trace_events"][0]
+    )
+
+    assert (
+        first_event["sequence"]
+        ==
+        1
+    )
+
+    assert (
+        first_event["event_type"]
+        ==
+        "node"
+    )
+
+    assert (
+        first_event["event_name"]
+        ==
+        "validate_question"
+    )
+
+    assert (
+        first_event["status"]
+        ==
+        "success"
+    )
+
+    assert (
+        first_event["duration_ms"]
+        ==
+        1.0
+    )
+
+    assert (
+        first_event[
+            "metadata"
+        ][
+            "question_valid"
+        ]
+        is True
+    )
+
+    second_event = (
+        data["trace_events"][1]
+    )
+
+    assert (
+        second_event["sequence"]
+        ==
+        2
+    )
+
+    assert (
+        second_event["event_type"]
+        ==
+        "route"
+    )
+
+    assert (
+        second_event[
+            "metadata"
+        ][
+            "selected_route"
+        ]
+        ==
+        "classify"
+    )
+
+
+def test_langgraph_query_api_returns_fallback_trace(
+    monkeypatch,
+):
+    """
+    LangGraph가 실제 fallback 경로를 사용한 경우
+    API response에도 fallback 상태가 전달되는지 검증합니다.
+
+    예:
+
+        failure_prediction intent
+
+        +
+
+        raw_sample 없음
+
+                │
+
+                ▼
+
+        prediction 수행 불가
+
+                │
+
+                ▼
+
+        fallback route
+
+                │
+
+                ▼
+
+        fallback answer
+
+
+    예상 trace:
+
+        trace_status
+
+        =
+
+        "fallback"
+
+
+        fallback_occurred
+
+        =
+
+        True
+    """
+
+    def fake_run_failure_agent_graph(
+        question,
+        raw_sample=None,
+        include_shap=True,
+        include_global_importance=True,
+        *,
+        chat_history=None,
+    ):
+        return {
+            "question": question,
+            "intent": "failure_prediction",
+            "confidence": 0.95,
+            "intent_source": "openai",
+            "intent_reason": (
+                "고장 위험 예측 요청입니다."
+            ),
+            "prediction": None,
+            "probability": None,
+            "threshold": None,
+            "risk_level": "UNKNOWN",
+            "recommended_action": (
+                "새 raw_sample을 제공해주세요."
+            ),
+            "answer": (
+                "현재 요청에는 raw_sample이 없어 "
+                "고장 예측을 수행할 수 없습니다."
+            ),
+            "evidence": [],
+            "warnings": [],
+            "errors": [
+                (
+                    "failure_prediction intent이지만 "
+                    "raw_sample이 없습니다."
+                )
+            ],
+            "limitations": [],
+
+            "trace_id": (
+                "bd4cfce50fd1481291a3ed76d0fb349a"
+            ),
+
+            "trace_status": "fallback",
+
+            "trace_started_at": (
+                "2026-07-10T01:20:00.000000+00:00"
+            ),
+
+            "trace_finished_at": (
+                "2026-07-10T01:20:00.125000+00:00"
+            ),
+
+            "trace_duration_ms": 125.0,
+
+            "fallback_occurred": True,
+
+            "trace_events": [
+                {
+                    "sequence": 1,
+                    "event_type": "node",
+                    "event_name": (
+                        "call_failure_prediction"
+                    ),
+                    "status": "error",
+                    "started_at": (
+                        "2026-07-10T01:20:00.100000+00:00"
+                    ),
+                    "finished_at": (
+                        "2026-07-10T01:20:00.110000+00:00"
+                    ),
+                    "duration_ms": 10.0,
+                    "metadata": {
+                        "raw_sample_provided": False,
+                        "prediction_succeeded": False,
+                        "errors_added": 1,
+                    },
+                },
+                {
+                    "sequence": 2,
+                    "event_type": "route",
+                    "event_name": (
+                        "route_after_prediction"
+                    ),
+                    "status": "fallback",
+                    "started_at": (
+                        "2026-07-10T01:20:00.111000+00:00"
+                    ),
+                    "finished_at": (
+                        "2026-07-10T01:20:00.112000+00:00"
+                    ),
+                    "duration_ms": 1.0,
+                    "metadata": {
+                        "selected_route": "fallback",
+                    },
+                },
+            ],
+        }
+
+    monkeypatch.setattr(
+        (
+            "src.api.langgraph_agent_api."
+            "run_failure_agent_graph"
+        ),
+        fake_run_failure_agent_graph,
+    )
+
+    response = client.post(
+        "/agent/langgraph-query",
+        json={
+            "question": (
+                "이 설비의 고장 위험을 "
+                "다시 예측해줘."
+            ),
+        },
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert (
+        data["trace_status"]
+        ==
+        "fallback"
+    )
+
+    assert (
+        data["fallback_occurred"]
+        is True
+    )
+
+    assert (
+        data["prediction"]
+        is None
+    )
+
+    assert (
+        data["risk_level"]
+        ==
+        "UNKNOWN"
+    )
+
+    assert (
+        len(data["errors"])
+        ==
+        1
+    )
+
+    assert (
+        len(data["trace_events"])
+        ==
+        2
+    )
+
+    prediction_event = (
+        data["trace_events"][0]
+    )
+
+    assert (
+        prediction_event["status"]
+        ==
+        "error"
+    )
+
+    assert (
+        prediction_event[
+            "metadata"
+        ][
+            "prediction_succeeded"
+        ]
+        is False
+    )
+
+    route_event = (
+        data["trace_events"][1]
+    )
+
+    assert (
+        route_event["status"]
+        ==
+        "fallback"
+    )
+
+    assert (
+        route_event[
+            "metadata"
+        ][
+            "selected_route"
+        ]
+        ==
+        "fallback"
+    )
+
+
+def test_langgraph_query_api_uses_trace_defaults_when_state_has_no_trace(
+    monkeypatch,
+):
+    """
+    기존 Day 14~15 스타일의 AgentState처럼
+    trace field가 없는 state도
+    API response 변환 과정에서 깨지지 않아야 합니다.
+
+    왜 필요한가?
+    -------------
+    Day 16 trace 기능을 추가했지만,
+    기존 단위 테스트의 fake runner는
+    trace field가 없는 dict를 반환할 수 있습니다.
+
+    LangGraphAgentQueryResponse에는
+    trace 기본값이 있으므로
+    기존 응답 생성 방식과의 호환성을 유지해야 합니다.
+
+
+    예상 기본값
+    -----------
+    trace_id:
+
+        None
+
+    trace_status:
+
+        None
+
+    trace_started_at:
+
+        None
+
+    trace_finished_at:
+
+        None
+
+    trace_duration_ms:
+
+        None
+
+    fallback_occurred:
+
+        False
+
+    trace_events:
+
+        []
+    """
+
+    def fake_run_failure_agent_graph(
+        question,
+        raw_sample=None,
+        include_shap=True,
+        include_global_importance=True,
+        *,
+        chat_history=None,
+    ):
+        # Day 15 스타일의 기존 state입니다.
+        #
+        # trace field를 의도적으로 넣지 않습니다.
+        return {
+            "question": question,
+            "intent": "dataset_schema_query",
+            "confidence": 0.9,
+            "intent_source": "openai",
+            "intent_reason": (
+                "데이터셋 schema 질문입니다."
+            ),
+            "answer": (
+                "AI4I 데이터셋 설명입니다."
+            ),
+            "evidence": [],
+            "warnings": [],
+            "errors": [],
+            "limitations": [],
+        }
+
+    monkeypatch.setattr(
+        (
+            "src.api.langgraph_agent_api."
+            "run_failure_agent_graph"
+        ),
+        fake_run_failure_agent_graph,
+    )
+
+    response = client.post(
+        "/agent/langgraph-query",
+        json={
+            "question": (
+                "AI4I 데이터셋은 뭐야?"
+            ),
+        },
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert (
+        data["trace_id"]
+        is None
+    )
+
+    assert (
+        data["trace_status"]
+        is None
+    )
+
+    assert (
+        data["trace_started_at"]
+        is None
+    )
+
+    assert (
+        data["trace_finished_at"]
+        is None
+    )
+
+    assert (
+        data["trace_duration_ms"]
+        is None
+    )
+
+    assert (
+        data["fallback_occurred"]
+        is False
+    )
+
+    assert (
+        data["trace_events"]
+        ==
+        []
+    )
+
+
+def test_openapi_schema_includes_langgraph_trace_fields():
+    """
+    Day 16 trace field가
+    FastAPI OpenAPI schema와 Swagger 문서에도
+    등록되어 있는지 검증합니다.
+
+    왜 OpenAPI schema를 테스트하는가?
+    --------------------------------
+    Python 내부 response에는 trace 값이 있어도,
+    LangGraphAgentQueryResponse schema에
+    field를 추가하지 않았다면
+    Swagger 문서에 표시되지 않을 수 있습니다.
+
+    따라서 API 문서에 아래 field가
+    실제 등록되어 있는지 확인합니다.
+
+        trace_id
+
+        trace_status
+
+        trace_started_at
+
+        trace_finished_at
+
+        trace_duration_ms
+
+        fallback_occurred
+
+        trace_events
+    """
+
+    response = client.get(
+        "/openapi.json"
+    )
+
+    assert response.status_code == 200
+
+    openapi_schema = response.json()
+
+    schemas = (
+        openapi_schema[
+            "components"
+        ][
+            "schemas"
+        ]
+    )
+
+    # FastAPI가 생성한
+    # LangGraph response schema입니다.
+    langgraph_response_schema = (
+        schemas[
+            "LangGraphAgentQueryResponse"
+        ]
+    )
+
+    properties = (
+        langgraph_response_schema[
+            "properties"
+        ]
+    )
+
+    expected_trace_fields = {
+        "trace_id",
+        "trace_status",
+        "trace_started_at",
+        "trace_finished_at",
+        "trace_duration_ms",
+        "fallback_occurred",
+        "trace_events",
+    }
+
+    # expected_trace_fields가
+    # 실제 OpenAPI properties 안에
+    # 모두 포함되어 있어야 합니다.
+    assert (
+        expected_trace_fields
+        <=
+        set(
+            properties.keys()
+        )
+    )
+
+    # trace_events는
+    # 배열 형태로 문서화되어야 합니다.
+    assert (
+        properties[
+            "trace_events"
+        ][
+            "type"
+        ]
+        ==
+        "array"
+    )
+
+    # 배열 안의 각 item은
+    # TraceEventResponse schema를
+    # 참조해야 합니다.
+    assert (
+        properties[
+            "trace_events"
+        ][
+            "items"
+        ][
+            "$ref"
+        ]
+        ==
+        (
+            "#/components/schemas/"
+            "TraceEventResponse"
+        )
+    )
