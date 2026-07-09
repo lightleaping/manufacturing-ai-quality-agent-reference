@@ -50,6 +50,7 @@ from langgraph.graph import END, START, StateGraph
 from src.agent.intent_classifier import classify_intent
 from src.agent.state import (
     AgentState,
+    ChatMessage,
     append_error,
     append_warning,
     create_initial_agent_state,
@@ -94,31 +95,123 @@ def classify_intent_node(state: AgentState) -> AgentState:
     처리 흐름
     --------
     1. state["question"]을 읽습니다.
-    2. intent_classifier.classify_intent()를 호출합니다.
-    3. 결과를 AgentState에 저장합니다.
+    2. state["chat_history"]를 읽습니다.
+    3. intent_classifier.classify_intent()를 호출합니다.
+    4. 결과를 AgentState에 저장합니다.
 
     classify_intent() 내부에서는 다음 구조가 동작합니다.
 
-        OpenAI gpt-4o-mini intent classification
+        최근 chat_history
+        +
+        현재 question
+        -> OpenAI gpt-4o-mini intent classification
         -> JSON 검증
         -> 실패 시 rule-based fallback
+
+    Day 15 확장
+    -----------
+    기존 Day 13에서는 현재 question만 intent classifier에 전달했습니다.
+
+        question
+        -> classify_intent()
+        -> intent
+
+    Day 15에서는 이전 대화 기록도 함께 전달합니다.
+
+        chat_history
+        +
+        question
+        -> classify_intent()
+        -> intent
+
+    예:
+
+        이전 user:
+            "이 설비 조건이면 고장 위험이 높아?"
+
+        이전 assistant:
+            "현재 입력 조건에서는 고장 위험이 높게 예측되었습니다."
+
+        현재 user:
+            "그건 왜 그래?"
+
+    현재 질문만 보면 "그건"이 무엇을 의미하는지 알기 어렵습니다.
+
+    이전 대화 문맥을 함께 전달하면
+    현재 질문이 이전 고장 예측과 관련된 후속 질문이라는 점을
+    intent classifier가 참고할 수 있습니다.
 
     주의
     ----
     LLM은 고장 예측을 직접 하지 않습니다.
-    LLM은 어떤 workflow로 보낼지 intent만 분류합니다.
+
+    LLM은 현재 질문이 어떤 workflow에 해당하는지
+    intent만 분류합니다.
+
+    chat_history는 질문의 문맥을 이해하기 위한 데이터입니다.
+
+    실제 고장 probability와 prediction은
+    계속 state["raw_sample"]을 사용하며,
+    Day 12 failure prediction service가 계산합니다.
     """
 
+    # 현재 intent를 분류할 사용자 질문을 읽습니다.
     question = state.get("question", "")
 
-    result = classify_intent(question)
+    # AgentState에 저장된 이전 대화 기록을 읽습니다.
+    #
+    # Day 15부터 create_initial_agent_state()는
+    # chat_history가 전달되지 않은 single-turn 요청에서도
+    # 새로운 빈 list를 state에 넣습니다.
+    #
+    # 따라서 일반적인 workflow에서는
+    # state["chat_history"]가 존재합니다.
+    #
+    # 하지만 LangGraph node는 테스트나 다른 Python 코드에서
+    # 부분적인 state를 직접 전달받을 수도 있습니다.
+    #
+    # 이런 경우에도 KeyError가 발생하지 않도록
+    # get("chat_history", [])를 사용해 방어적으로 읽습니다.
+    chat_history = state.get(
+        "chat_history",
+        [],
+    )
 
+    # 현재 질문과 이전 대화 기록을
+    # intent classifier에 함께 전달합니다.
+    #
+    # question:
+    #   지금 intent를 분류해야 하는 현재 사용자 질문
+    #
+    # chat_history:
+    #   "그건", "그중", "방금 결과" 같은
+    #   후속 표현의 문맥을 이해하기 위한 이전 대화
+    #
+    # chat_history는 PyTorch 모델 입력이 아닙니다.
+    #
+    # 실제 prediction은 이후
+    # call_failure_prediction_node()에서
+    # state["raw_sample"]을 사용해 수행합니다.
+    result = classify_intent(
+        question,
+        chat_history=chat_history,
+    )
+
+    # intent classifier가 반환한 결과를
+    # 이후 LangGraph node와 router가 사용할 수 있도록
+    # AgentState에 저장합니다.
     state["intent"] = result.intent
     state["confidence"] = result.confidence
     state["intent_reason"] = result.reason
     state["intent_source"] = result.source
     state["intent_raw_response"] = result.raw_response
 
+    # OpenAI 호출 실패, JSON 검증 실패 등으로
+    # rule-based fallback이 사용된 경우
+    # Agent 전체를 중단하지 않고 warning으로 기록합니다.
+    #
+    # intent 자체는 fallback으로 얻었으므로
+    # workflow를 계속 실행할 수 있습니다.
     if result.error is not None:
         append_warning(
             state,
@@ -158,17 +251,26 @@ def call_failure_prediction_node(state: AgentState) -> AgentState:
         state["risk_level"] = "UNKNOWN"
 
         state["recommended_action"] = (
-            "고장 위험 예측을 위해 설비 입력값을 함께 보내주세요."
+            "현재 요청에는 raw_sample이 없어 고장 예측을 수행할 수 없습니다. "
+            "이전 대화의 설비 조건이나 raw_sample은 자동으로 재사용하지 않으므로, "
+            "현재 예측에 사용할 설비 입력값을 요청에 함께 보내주세요."
         )
 
         state["answer"] = (
-            "고장 위험 예측에는 air_temperature, process_temperature, "
-            "rotational_speed, torque, tool_wear, type 값이 필요합니다."
+            "현재 요청에는 raw_sample이 없어 고장 위험 예측을 수행할 수 없습니다.\n\n"
+            "chat_history는 현재 질문의 문맥을 이해하는 용도로만 사용하며, "
+            "이전 대화의 설비 조건이나 raw_sample은 자동으로 재사용하지 않습니다.\n\n"
+            "고장 위험을 다시 예측하려면 "
+            "air_temperature, process_temperature, rotational_speed, "
+            "torque, tool_wear, type 값을 포함한 "
+            "새 raw_sample을 요청에 함께 제공해주세요."
         )
 
         state.setdefault("errors", []).append(
-            "failure_prediction intent이지만 raw_sample이 없어 "
-            "prediction을 수행할 수 없습니다."
+            "failure_prediction intent이지만 현재 요청에 raw_sample이 없어 "
+            "prediction을 수행할 수 없습니다. "
+            "chat_history는 질문 문맥 이해용이며, "
+            "이전 대화의 설비 조건이나 raw_sample은 자동으로 재사용하지 않습니다."
         )
 
         return state
@@ -295,7 +397,8 @@ def build_fallback_answer_node(state: AgentState) -> AgentState:
             "확인된 문제:\n"
             + "\n".join(f"- {error}" for error in errors)
             + "\n\n"
-            "고장 예측을 원한다면 설비 입력값 raw_sample을 함께 제공해야 합니다."
+            "고장 위험을 다시 예측하려면 "
+            "현재 예측에 사용할 새 raw_sample을 요청에 함께 제공해주세요."
         )
         return state
 
@@ -469,31 +572,115 @@ def run_failure_agent_graph(
     raw_sample: dict[str, Any] | None = None,
     include_shap: bool = True,
     include_global_importance: bool = True,
+    *,
+    # 이전 사용자 질문과 Agent 답변입니다.
+    #
+    # Day 15에서는 현재 question의 문맥을 이해할 수 있도록
+    # chat_history를 LangGraph 초기 state에 저장합니다.
+    #
+    # 기본값을 []로 직접 작성하지 않는 이유
+    # --------------------------------------
+    # list는 append(), extend() 등으로
+    # 내부 값을 변경할 수 있는 mutable 객체입니다.
+    #
+    # 다음처럼 작성하면:
+    #
+    #     chat_history: list[ChatMessage] = []
+    #
+    # 함수가 호출될 때마다 새로운 빈 list를 만드는 것이 아니라,
+    # 함수가 정의될 때 만들어진 같은 기본 list 객체가
+    # 여러 호출에서 재사용될 수 있습니다.
+    #
+    # 그러면 이전 Agent 요청에서 추가한 대화가
+    # 다음 Agent 요청에 잘못 남을 가능성이 있습니다.
+    #
+    # 따라서 기본값은 None으로 두고,
+    # create_initial_agent_state()에서
+    # 요청마다 새로운 list를 생성합니다.
+    chat_history: list[ChatMessage] | None = None,
 ) -> AgentState:
     """
     LangGraph workflow를 실행하는 공개 runner 함수입니다.
 
     FastAPI endpoint는 AgentState 내부 구조를 직접 만들지 않고
-    question과 선택적 raw_sample만 전달합니다.
+    question, 선택적 raw_sample, 선택적 chat_history를 전달합니다.
 
     runner가 API 입력을 AgentState로 변환하고
     compiled LangGraph workflow를 실행합니다.
+
+    Day 15 확장
+    -----------
+    기존 Day 14 흐름:
+
+        question
+        +
+        raw_sample
+        -> AgentState
+        -> LangGraph workflow
+
+    Day 15 흐름:
+
+        question
+        +
+        chat_history
+        +
+        raw_sample
+        -> AgentState
+        -> LangGraph workflow
+
+    각 입력의 책임
+    --------------
+    question:
+        현재 intent를 분류할 사용자 질문
+
+    chat_history:
+        현재 질문의 문맥을 이해하기 위한
+        이전 user/assistant 대화 기록
+
+    raw_sample:
+        PyTorch MLP가 실제 고장 probability를 계산할 때 사용하는
+        설비 입력값
+
+    chat_history에 이전 probability나 설비 값이 적혀 있어도
+    해당 텍스트를 새로운 모델 입력으로 자동 사용하지 않습니다.
+
+    실제 prediction은 계속 raw_sample을 사용합니다.
     """
 
+    # FastAPI request 또는 다른 Python 코드에서 전달한 값을
+    # LangGraph node들이 공유할 초기 AgentState로 변환합니다.
     initial_state = create_initial_agent_state(
         question=question,
         raw_sample=raw_sample,
+
+        # 이전 대화 기록을 초기 state에 저장합니다.
+        #
+        # chat_history가 None이면
+        # create_initial_agent_state() 내부에서
+        # 새로운 빈 list를 생성합니다.
+        chat_history=chat_history,
     )
 
+    # SHAP local evidence를 포함할지 저장합니다.
+    #
+    # 이후 call_failure_prediction_node()에서
+    # Day 12 prediction service에 전달합니다.
     initial_state["include_shap"] = include_shap
+
+    # global permutation importance evidence를
+    # 포함할지 저장합니다.
     initial_state["include_global_importance"] = (
         include_global_importance
     )
 
+    # LangGraph workflow를 생성하고 compile합니다.
     graph = build_failure_agent_graph()
 
+    # 초기 AgentState를 graph에 전달하여
+    # validate -> classify -> routing -> answer 흐름을 실행합니다.
     final_state = graph.invoke(initial_state)
 
+    # 모든 node 실행이 끝난 최종 AgentState를 반환합니다.
     return final_state
     
 

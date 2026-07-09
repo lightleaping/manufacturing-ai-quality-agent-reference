@@ -87,7 +87,20 @@ def test_classify_intent_node_stores_classification_result(monkeypatch):
     fake_classify_intent로 교체합니다.
     """
 
-    def fake_classify_intent(question: str) -> IntentClassificationResult:
+    def fake_classify_intent(
+        question: str,
+        *,
+        # Day 15부터 실제 classify_intent() 함수는
+        # 현재 질문뿐 아니라 이전 대화 기록도 받을 수 있습니다.
+        #
+        # 따라서 monkeypatch로 대신 실행되는 fake 함수도
+        # 실제 함수와 같은 호출 interface를 가져야 합니다.
+        #
+        # 현재 테스트의 목적은
+        # intent 분류 결과가 AgentState에 저장되는지 확인하는 것이므로,
+        # chat_history 값을 직접 사용하지는 않습니다.
+        chat_history=None,
+    ) -> IntentClassificationResult:
         return IntentClassificationResult(
             intent="failure_prediction",
             confidence=0.91,
@@ -122,7 +135,15 @@ def test_classify_intent_node_adds_warning_when_classifier_has_error(monkeypatch
     intent classifier가 fallback 또는 오류를 반환하면 warnings에 기록해야 합니다.
     """
 
-    def fake_classify_intent(question: str) -> IntentClassificationResult:
+    def fake_classify_intent(
+        question: str,
+        *,
+        # 실제 classify_intent()가 Day 15부터
+        # chat_history keyword argument를 받을 예정이므로,
+        # 오류 상황을 만드는 fake 함수도
+        # 같은 매개변수를 받을 수 있어야 합니다.
+        chat_history=None,
+    ) -> IntentClassificationResult:
         return IntentClassificationResult(
             intent="failure_prediction",
             confidence=0.65,
@@ -226,6 +247,16 @@ def test_call_failure_prediction_node_adds_error_when_raw_sample_missing():
 
     assert len(result["errors"]) == 1
     assert "raw_sample이 없어" in result["errors"][0]
+    
+    # chat_history는 현재 질문의 문맥을 이해하기 위한 데이터일 뿐,
+    # 이전 설비 조건이나 raw_sample을
+    # 새로운 prediction 입력으로 자동 재사용하지 않는다는
+    # 안내가 error에 포함되어야 합니다.
+    assert (
+        "이전 대화의 설비 조건이나 raw_sample은 "
+        "자동으로 재사용하지 않습니다"
+        in result["errors"][0]
+    )
 
 
 def test_call_failure_prediction_node_stores_prediction_result(monkeypatch):
@@ -398,20 +429,61 @@ def test_build_dataset_schema_answer_node_sets_answer_and_evidence():
 
 def test_build_fallback_answer_node_uses_errors_when_present():
     """
-    errors가 있으면 fallback answer에 확인된 문제를 포함해야 합니다.
+    errors가 있으면
+    fallback answer에 확인된 오류 내용을 포함해야 합니다.
+
+    이 테스트의 목적
+    ----------------
+    이 테스트는 call_failure_prediction_node()의
+    raw_sample 처리 정책을 검증하는 테스트가 아닙니다.
+
+    이미 state["errors"]에 오류가 들어 있다고 가정한 뒤,
+    build_fallback_answer_node()가 해당 오류를
+    최종 answer에 포함하는지 확인합니다.
+
+    이전 대화의 설비 조건이나 raw_sample을
+    자동 재사용하지 않는 정책은
+    전체 workflow 테스트에서 별도로 검증합니다.
     """
 
     state = create_initial_agent_state(
         question="이 설비 조건이면 고장 위험이 높아?"
     )
+
+    # fallback node가 전달받았다고 가정할
+    # 테스트용 오류 메시지를 직접 추가합니다.
+    error_message = (
+        "raw_sample이 없어 "
+        "failure_prediction을 수행할 수 없습니다."
+    )
+
     state["errors"].append(
-        "raw_sample이 없어 failure_prediction을 수행할 수 없습니다."
+        error_message
     )
 
     result = build_fallback_answer_node(state)
 
-    assert "요청을 처리하는 중 문제가 발생했습니다." in result["answer"]
-    assert "raw_sample이 없어" in result["answer"]
+    # 오류가 있을 때 사용하는
+    # fallback 안내 문구가 포함되어야 합니다.
+    assert (
+        "요청을 처리하는 중 문제가 발생했습니다."
+        in result["answer"]
+    )
+
+    # state["errors"]에 넣은 실제 오류 내용이
+    # 최종 answer에도 포함되어야 합니다.
+    assert (
+        error_message
+        in result["answer"]
+    )
+
+    # 사용자가 다시 prediction을 요청하려면
+    # 현재 요청에 새 raw_sample을 제공해야 한다는
+    # 후속 안내가 포함되어야 합니다.
+    assert (
+        "현재 예측에 사용할 새 raw_sample"
+        in result["answer"]
+    )
 
 
 def test_build_fallback_answer_node_handles_unknown_intent():
@@ -530,7 +602,14 @@ def test_run_failure_agent_graph_handles_dataset_schema_query(monkeypatch):
     실제 OpenAI API를 호출하지 않기 위해 classify_intent를 fake 함수로 교체합니다.
     """
 
-    def fake_classify_intent(question: str) -> IntentClassificationResult:
+    def fake_classify_intent(
+        question: str,
+        *,
+        # LangGraph 전체 실행 중 classify_intent_node가
+        # question과 chat_history를 함께 전달할 수 있도록
+        # fake 함수도 동일한 interface를 유지합니다.
+        chat_history=None,
+    ) -> IntentClassificationResult:
         return IntentClassificationResult(
             intent="dataset_schema_query",
             confidence=0.9,
@@ -561,7 +640,14 @@ def test_run_failure_agent_graph_handles_unknown_intent(monkeypatch):
     전체 LangGraph workflow가 unknown intent를 fallback answer로 처리하는지 확인합니다.
     """
 
-    def fake_classify_intent(question: str) -> IntentClassificationResult:
+    def fake_classify_intent(
+        question: str,
+        *,
+        # Day 15 multi-turn 연결 후에도
+        # unknown intent workflow 테스트가
+        # 새 함수 호출 방식과 호환되도록 합니다.
+        chat_history=None,
+    ) -> IntentClassificationResult:
         return IntentClassificationResult(
             intent="unknown",
             confidence=0.3,
@@ -593,7 +679,16 @@ def test_run_failure_agent_graph_handles_failure_prediction(monkeypatch):
     실제 OpenAI API와 실제 Day 12 prediction service는 호출하지 않습니다.
     """
 
-    def fake_classify_intent(question: str) -> IntentClassificationResult:
+    def fake_classify_intent(
+        question: str,
+        *,
+        # 실제 classifier와 fake classifier의
+        # 함수 interface를 일치시킵니다.
+        #
+        # chat_history는 intent 문맥 이해용이며,
+        # 아래 prediction service의 raw_sample과는 역할이 다릅니다.
+        chat_history=None,
+    ) -> IntentClassificationResult:
         return IntentClassificationResult(
             intent="failure_prediction",
             confidence=0.95,
@@ -673,7 +768,21 @@ def test_run_failure_agent_graph_falls_back_when_failure_prediction_has_no_raw_s
     failure_prediction intent인데 raw_sample이 없으면 fallback answer로 끝나야 합니다.
     """
 
-    def fake_classify_intent(question: str) -> IntentClassificationResult:
+    def fake_classify_intent(
+        question: str,
+        *,
+        # chat_history가 전달되더라도
+        # 실제 prediction에 필요한 raw_sample을 대신할 수는 없습니다.
+        #
+        # 이 테스트는 여전히:
+        #
+        # failure_prediction intent
+        # +
+        # raw_sample 없음
+        #
+        # 상황에서 fallback으로 이동하는지 검증합니다.
+        chat_history=None,
+    ) -> IntentClassificationResult:
         return IntentClassificationResult(
             intent="failure_prediction",
             confidence=0.95,
@@ -697,3 +806,256 @@ def test_run_failure_agent_graph_falls_back_when_failure_prediction_has_no_raw_s
     assert len(result["errors"]) == 1
     assert "raw_sample이 없어" in result["errors"][0]
     assert "요청을 처리하는 중 문제가 발생했습니다" in result["answer"]
+
+    # 최종 fallback answer에서도
+    # 이전 대화의 설비 조건을 자동 재사용하지 않는다는
+    # 현재 multi-turn 설계 원칙을 사용자에게 안내해야 합니다.
+    assert (
+        "이전 대화의 설비 조건이나 raw_sample은 "
+        "자동으로 재사용하지 않습니다"
+        in result["answer"]
+    )
+
+    # 사용자가 실제 prediction을 다시 요청하려면
+    # 현재 예측에 사용할 새 raw_sample을
+    # 요청에 포함해야 한다는 안내도 있어야 합니다.
+    assert (
+        "현재 예측에 사용할 새 raw_sample"
+        in result["answer"]
+    )
+
+def test_classify_intent_node_passes_chat_history_to_classifier(
+    monkeypatch,
+):
+    """
+    classify_intent_node()가 AgentState에 저장된 chat_history를
+    intent classifier까지 전달하는지 확인합니다.
+
+    왜 이 테스트가 필요한가?
+    -------------------------
+    AgentState에 chat_history가 저장되어 있어도
+    classify_intent() 호출에 전달하지 않으면
+    실제 intent 분류에는 사용되지 않습니다.
+
+    따라서 아래 연결을 직접 검증합니다.
+
+        AgentState["chat_history"]
+
+                │
+
+                ▼
+
+        classify_intent_node()
+
+                │
+
+                ▼
+
+        classify_intent(
+            question,
+            chat_history=...
+        )
+    """
+
+    # fake classifier가 실제로 받은 값을
+    # 테스트 함수의 마지막에서 확인하기 위한 dict입니다.
+    #
+    # dict는 mutable 객체이므로
+    # fake 함수 내부에서 값을 저장한 뒤
+    # 바깥 테스트 코드에서 확인할 수 있습니다.
+    captured_arguments = {}
+
+    def fake_classify_intent(
+        question: str,
+        *,
+        chat_history=None,
+    ) -> IntentClassificationResult:
+        """
+        실제 OpenAI API를 호출하지 않는 테스트용 classifier입니다.
+
+        이 테스트의 목적은 intent 분류 정확도가 아니라,
+        classify_intent_node()가 question과 chat_history를
+        올바르게 전달하는지 확인하는 것입니다.
+        """
+
+        # classify_intent_node()가 전달한
+        # 현재 질문을 저장합니다.
+        captured_arguments["question"] = question
+
+        # classify_intent_node()가 전달한
+        # 이전 대화 기록을 저장합니다.
+        captured_arguments["chat_history"] = chat_history
+
+        return IntentClassificationResult(
+            intent="failure_prediction",
+            confidence=0.9,
+            reason="이전 고장 예측 대화의 후속 질문입니다.",
+            source="openai",
+            raw_response=None,
+            error=None,
+        )
+
+    monkeypatch.setattr(
+        failure_agent_graph,
+        "classify_intent",
+        fake_classify_intent,
+    )
+
+    chat_history = [
+        {
+            "role": "user",
+            "content": "이 설비 조건이면 고장 위험이 높아?",
+        },
+        {
+            "role": "assistant",
+            "content": (
+                "현재 입력 조건에서는 "
+                "고장 위험이 높게 예측되었습니다."
+            ),
+        },
+    ]
+
+    state = create_initial_agent_state(
+        question="그건 왜 그래?",
+        chat_history=chat_history,
+    )
+
+    result = classify_intent_node(state)
+
+    # 현재 질문이 classifier까지 전달되어야 합니다.
+    assert captured_arguments["question"] == "그건 왜 그래?"
+
+    # AgentState에 저장된 이전 대화 기록도
+    # classifier까지 전달되어야 합니다.
+    assert captured_arguments["chat_history"] == chat_history
+
+    # fake classifier의 분류 결과가
+    # AgentState에 정상 저장되어야 합니다.
+    assert result["intent"] == "failure_prediction"
+    assert result["confidence"] == 0.9
+    assert result["intent_source"] == "openai"
+
+
+def test_run_failure_agent_graph_passes_chat_history_through_workflow(
+    monkeypatch,
+):
+    """
+    공개 runner에 전달한 chat_history가
+    LangGraph workflow 안의 classifier까지 전달되는지 확인합니다.
+
+    이 테스트는 node 하나만 직접 호출하는 것이 아니라,
+    실제 공개 runner부터 전체 graph를 실행합니다.
+
+    검증 흐름:
+
+        run_failure_agent_graph(
+            question,
+            chat_history,
+        )
+
+                │
+
+                ▼
+
+        create_initial_agent_state()
+
+                │
+
+                ▼
+
+        AgentState["chat_history"]
+
+                │
+
+                ▼
+
+        classify_intent_node()
+
+                │
+
+                ▼
+
+        classify_intent()
+    """
+
+    captured_arguments = {}
+
+    def fake_classify_intent(
+        question: str,
+        *,
+        chat_history=None,
+    ) -> IntentClassificationResult:
+        """
+        실제 OpenAI 호출 대신
+        runner에서 전달된 question과 history를 기록합니다.
+        """
+
+        captured_arguments["question"] = question
+        captured_arguments["chat_history"] = chat_history
+
+        # 이번 테스트에서는 prediction service가 필요 없는
+        # dataset_schema_query를 반환합니다.
+        #
+        # 이렇게 하면 실제 모델 artifact나 SHAP을 로드하지 않고
+        # LangGraph 전체 흐름을 테스트할 수 있습니다.
+        return IntentClassificationResult(
+            intent="dataset_schema_query",
+            confidence=0.88,
+            reason="이전 데이터셋 대화의 후속 질문입니다.",
+            source="openai",
+            raw_response=None,
+            error=None,
+        )
+
+    monkeypatch.setattr(
+        failure_agent_graph,
+        "classify_intent",
+        fake_classify_intent,
+    )
+
+    chat_history = [
+        {
+            "role": "user",
+            "content": "AI4I 데이터셋의 feature는 뭐야?",
+        },
+        {
+            "role": "assistant",
+            "content": (
+                "현재 모델은 AI4I feature 6개를 사용합니다."
+            ),
+        },
+    ]
+
+    result = run_failure_agent_graph(
+        question="그중 target은 뭐야?",
+        chat_history=chat_history,
+    )
+
+    # 공개 runner에 전달한 현재 질문이
+    # classifier까지 전달되어야 합니다.
+    assert (
+        captured_arguments["question"]
+        == "그중 target은 뭐야?"
+    )
+
+    # 공개 runner에 전달한 chat_history가
+    # 초기 AgentState와 LangGraph node를 거쳐
+    # classifier까지 전달되어야 합니다.
+    assert (
+        captured_arguments["chat_history"]
+        == chat_history
+    )
+
+    # 최종 state에도 chat_history가 유지되어야 합니다.
+    assert result["chat_history"] == chat_history
+
+    # fake classifier가 반환한 intent에 따라
+    # dataset schema 경로가 실행되어야 합니다.
+    assert result["intent"] == "dataset_schema_query"
+
+    assert (
+        "AI4I 2020 Predictive Maintenance Dataset"
+        in result["answer"]
+    )
+
+    assert result["errors"] == []

@@ -26,6 +26,34 @@ LangGraph에서는 하나의 질문을 처리할 때 여러 node가 순서대로
 이번 Day 13에서는 OpenAI intent classifier, fallback, prediction service,
 evidence, warnings, errors를 하나의 workflow state에 담아 관리합니다.
 
+Day 15 확장
+-----------
+Day 15에서는 이전 사용자 질문과 Agent 답변을 저장할 수 있도록
+chat_history 구조를 더 명확하게 정의합니다.
+
+기존에는 chat_history를 list[dict[str, str]] 타입으로 표현했지만,
+이 타입만으로는 dict에 어떤 key가 반드시 필요한지 알기 어렵습니다.
+
+Day 15에서는 ChatMessage TypedDict를 추가하여
+각 대화 메시지가 반드시 아래 두 값을 가지도록 타입을 명확하게 표현합니다.
+
+    role:
+        메시지를 작성한 주체
+        "user" 또는 "assistant"
+
+    content:
+        실제 질문 또는 답변 내용
+
+chat_history는 모델 prediction 입력이 아닙니다.
+
+chat_history:
+    현재 질문의 문맥을 이해하고 intent를 분류하기 위한 대화 기록
+
+raw_sample:
+    PyTorch MLP가 실제 고장 probability를 계산할 때 사용하는 설비 입력값
+
+두 데이터의 책임을 구분합니다.
+
 중요한 점
 ---------
 1. 처음부터 모든 값이 존재하지 않습니다.
@@ -70,6 +98,91 @@ AgentIntent = Literal[
     "dataset_schema_query",
     "unknown",
 ]
+
+
+# ChatRole은 대화 메시지를 작성한 주체를 나타냅니다.
+#
+# user:
+#   사용자가 입력한 질문 또는 후속 질문
+#
+# assistant:
+#   이전 LangGraph Agent가 생성한 답변
+#
+# 왜 일반 str이 아니라 Literal을 사용하는가?
+# -----------------------------------------
+# 다음처럼 일반 str을 사용하면:
+#
+#     role: str
+#
+# "user", "assistant" 외에도
+# 오타나 지원하지 않는 문자열이 타입상 허용됩니다.
+#
+# 예:
+#     "uesr"
+#     "system"
+#     "developer"
+#
+# 현재 Day 15 API에서는 이전 사용자 질문과
+# 이전 Agent 답변만 대화 이력으로 받습니다.
+#
+# 따라서 Literal을 사용하여 허용할 값을
+# "user"와 "assistant"로 명확하게 제한합니다.
+#
+# 특히 외부 API 사용자가 임의로 "system" role을 전달하면,
+# 대화 기록과 내부 system instruction의 경계가 흐려질 수 있습니다.
+#
+# 내부 system instruction은 개발자가 관리하고,
+# API의 chat_history는 문맥 이해용 user/assistant 데이터로만 사용합니다.
+ChatRole = Literal["user", "assistant"]
+
+
+class ChatMessage(TypedDict):
+    """
+    chat_history에 저장할 대화 메시지 한 개의 구조입니다.
+
+    예:
+        {
+            "role": "user",
+            "content": "이 설비 조건이면 고장 위험이 높아?"
+        }
+
+        {
+            "role": "assistant",
+            "content": "현재 입력 조건에서는 고장 위험이 높게 예측되었습니다."
+        }
+
+    왜 dict[str, str] 대신 TypedDict를 사용하는가?
+    ---------------------------------------------
+    기존 타입:
+
+        dict[str, str]
+
+    이 타입은 key와 value가 문자열이라는 사실만 표현합니다.
+
+    따라서 아래처럼 필요한 key가 빠져도
+    타입 구조가 명확하지 않습니다.
+
+        {
+            "speaker": "user",
+            "message": "고장 위험이 높아?"
+        }
+
+    Day 15에서는 ChatMessage TypedDict를 사용하여
+    각 메시지가 반드시 role과 content를 가진다는 사실을
+    타입 수준에서 명확하게 표현합니다.
+
+    ChatMessage는 total=True가 기본값입니다.
+
+    따라서 role과 content는 모두 필수 key입니다.
+    """
+
+    # 메시지를 작성한 주체입니다.
+    #
+    # 현재는 "user" 또는 "assistant"만 허용합니다.
+    role: ChatRole
+
+    # 실제 질문 또는 답변 내용입니다.
+    content: str
 
 
 class AgentState(TypedDict, total=False):
@@ -119,12 +232,27 @@ class AgentState(TypedDict, total=False):
     # Day 13에서는 필수는 아니지만,
     # 이후 multi-turn Agent로 확장할 때 사용할 수 있습니다.
     #
+    # Day 15에서는 ChatMessage TypedDict를 사용하여
+    # 각 메시지가 role과 content를 가지도록 타입을 구체화합니다.
+    #
     # 예:
     # [
     #   {"role": "user", "content": "이 설비 위험해?"},
     #   {"role": "assistant", "content": "고장 위험이 높습니다."}
     # ]
-    chat_history: NotRequired[list[dict[str, str]]]
+    #
+    # chat_history의 목적:
+    #   이전 대화를 참고하여
+    #   "그건 왜 그래?"
+    #   "그중 중요한 것은 뭐야?"
+    #   같은 후속 질문의 문맥을 이해하는 것
+    #
+    # chat_history가 하지 않는 일:
+    #   이전 대화에 적힌 설비 값을
+    #   자동으로 PyTorch 모델 입력으로 사용하는 것
+    #
+    # 실제 prediction은 계속 raw_sample을 사용합니다.
+    chat_history: NotRequired[list[ChatMessage]]
 
     # OpenAI 또는 rule-based classifier가 분류한 intent입니다.
     #
@@ -273,11 +401,40 @@ class AgentState(TypedDict, total=False):
     include_shap: NotRequired[bool]
     include_global_importance: NotRequired[bool]
 
+
 def create_initial_agent_state(
     *,
     question: str,
     raw_sample: dict[str, Any] | None = None,
-    chat_history: list[dict[str, str]] | None = None,
+
+    # list는 값을 추가하거나 삭제할 수 있는 mutable 객체입니다.
+    #
+    # 다음처럼 함수 매개변수의 기본값을 직접 []로 작성하면:
+    #
+    #     chat_history: list[ChatMessage] = []
+    #
+    # 함수가 호출될 때마다 새로운 빈 list가 생성되는 것이 아니라,
+    # 함수가 정의될 때 생성된 하나의 기본 list 객체가
+    # 이후 여러 함수 호출에서 계속 재사용될 수 있습니다.
+    #
+    # 따라서 함수 내부에서 append(), extend() 등으로
+    # 기본 list의 내용을 수정하면,
+    # 이전 함수 호출에서 추가한 대화 기록이
+    # 다음 함수 호출에도 남을 수 있습니다.
+    #
+    # Agent 요청마다 대화 기록은 서로 독립적이어야 합니다.
+    #
+    # 이전 요청의 chat_history가 새로운 요청에 섞이면,
+    # 서로 관련 없는 사용자의 질문이나 Agent 답변이
+    # 다음 intent 분류의 문맥으로 잘못 사용될 수 있습니다.
+    #
+    # 이를 방지하기 위해 수정 가능한 빈 list인 []를
+    # 함수 기본값으로 직접 사용하지 않고,
+    # 기본값을 None으로 둡니다.
+    #
+    # 이후 함수가 실제로 실행될 때
+    # 새로운 빈 list를 생성합니다.
+    chat_history: list[ChatMessage] | None = None,
 ) -> AgentState:
     """
     LangGraph 실행을 시작하기 위한 초기 AgentState를 만듭니다.
@@ -299,7 +456,14 @@ def create_initial_agent_state(
 
     chat_history:
         이전 대화 기록입니다.
-        Day 13에서는 선택값입니다.
+
+        Day 13에서는 선택값으로 준비했습니다.
+
+        Day 15에서는 값이 전달되지 않아도
+        초기 state에 새로운 빈 list를 넣습니다.
+
+        따라서 이후 node는 chat_history key가 있는지
+        매번 검사하지 않고 대화 기록을 읽을 수 있습니다.
 
     Returns
     -------
@@ -310,6 +474,53 @@ def create_initial_agent_state(
     state: AgentState = {
         # question은 Required 필드이므로 반드시 넣습니다.
         "question": question,
+
+        # chat_history가 전달되지 않았다면:
+        #
+        #     chat_history is None
+        #
+        # 아래 표현은 새로운 빈 list를 만듭니다.
+        #
+        #     list([])
+        #
+        # chat_history가 전달되었다면:
+        #
+        #     list(chat_history)
+        #
+        # 를 실행하여 새로운 최상위 list 객체를 만듭니다.
+        #
+        # 따라서 외부에서 전달한 원본 chat_history list와
+        # AgentState 내부의 chat_history list가
+        # 같은 최상위 list 객체를 직접 공유하지 않습니다.
+        #
+        # 예:
+        #
+        # original_history = [
+        #     {
+        #         "role": "user",
+        #         "content": "고장 위험이 높아?"
+        #     }
+        # ]
+        #
+        # state = create_initial_agent_state(
+        #     question="그건 왜 그래?",
+        #     chat_history=original_history,
+        # )
+        #
+        # state["chat_history"].append(...)
+        #
+        # 위 코드에서 state 내부 list에 새 메시지를 추가해도
+        # original_history의 최상위 list에는
+        # 같은 메시지가 자동으로 추가되지 않습니다.
+        #
+        # 주의:
+        # list(...)는 얕은 복사이므로
+        # list 안의 개별 dict까지 깊게 복사하는 것은 아닙니다.
+        #
+        # 현재 구조에서는 메시지 dict 자체를 수정하지 않고,
+        # 새로운 메시지를 list에 추가하는 방식으로 사용할 예정이므로
+        # 최상위 list를 분리하는 것으로 충분합니다.
+        "chat_history": list(chat_history or []),
 
         # warnings와 errors는 여러 node에서 append할 가능성이 높습니다.
         # 처음부터 빈 list로 만들어두면 이후 코드에서 setdefault를 반복하지 않아도 됩니다.
@@ -333,9 +544,17 @@ def create_initial_agent_state(
     if raw_sample is not None:
         state["raw_sample"] = raw_sample
 
-    # chat_history도 제공된 경우에만 추가합니다.
-    if chat_history is not None:
-        state["chat_history"] = chat_history
+    # Day 13에서는 chat_history가 제공된 경우에만
+    # 아래와 같이 state에 추가했습니다.
+    #
+    #     if chat_history is not None:
+    #         state["chat_history"] = chat_history
+    #
+    # Day 15에서는 chat_history가 없어도
+    # 항상 새로운 빈 list를 초기 state에 넣습니다.
+    #
+    # 따라서 기존 조건문은 제거하고,
+    # 위 state 생성 부분에서 chat_history를 초기화합니다.
 
     return state
 
