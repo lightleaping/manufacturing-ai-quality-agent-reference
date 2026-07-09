@@ -41,6 +41,8 @@ from fastapi.testclient import TestClient
 
 from src.api.main import app
 
+from src.api.artifact_cache import clear_artifact_cache_for_tests
+
 
 @dataclass
 class FakePredictionResult:
@@ -299,32 +301,34 @@ def test_failure_prediction_agent_api_returns_expected_structure(monkeypatch):
             "SHAP 기준으로 Torque는 모델의 고장 위험 logit을 높이는 방향으로 작용했습니다."
         )
 
+    clear_artifact_cache_for_tests()
+
     monkeypatch.setattr(
-        "src.api.failure_agent_api.load_failure_model_artifacts",
+        "src.api.artifact_cache.load_failure_model_artifacts",
         fake_load_failure_model_artifacts,
     )
     monkeypatch.setattr(
-        "src.api.failure_agent_api.predict_failure_from_artifacts",
+        "src.api.failure_agent_service.predict_failure_from_artifacts",
         fake_predict_failure_from_artifacts,
     )
     monkeypatch.setattr(
-        "src.api.failure_agent_api.load_shap_artifacts",
+        "src.api.artifact_cache.load_shap_artifacts",
         fake_load_shap_artifacts,
     )
     monkeypatch.setattr(
-        "src.api.failure_agent_api.build_global_importance_items_from_map",
+        "src.api.failure_agent_service.build_global_importance_items_from_map",
         fake_build_global_importance_items_from_map,
     )
     monkeypatch.setattr(
-        "src.api.failure_agent_api.build_shap_local_explanation_for_sample",
+        "src.api.failure_agent_service.build_shap_local_explanation_for_sample",
         fake_build_shap_local_explanation_for_sample,
     )
     monkeypatch.setattr(
-        "src.api.failure_agent_api.build_agent_evidence",
+        "src.api.failure_agent_service.build_agent_evidence",
         fake_build_agent_evidence,
     )
     monkeypatch.setattr(
-        "src.api.failure_agent_api.build_agent_answer",
+        "src.api.failure_agent_service.build_agent_answer",
         fake_build_agent_answer,
     )
 
@@ -377,3 +381,139 @@ def test_failure_prediction_agent_api_returns_expected_structure(monkeypatch):
     assert len(shap_evidence) >= 1
     assert shap_evidence[0]["source"] == "shap"
     assert shap_evidence[0]["direction"] == "positive"
+
+
+# tests/test_api_failure_agent.py 일부 추가
+
+"""
+Day 12 API 안정성 테스트
+
+추가 테스트 목표
+----------------
+1. 정상 요청은 계속 성공해야 한다.
+2. SHAP artifact 로드가 실패해도 API 전체는 200을 반환해야 한다.
+3. SHAP 실패 시 warnings에 이유가 들어가야 한다.
+4. shap_local evidence는 생략되어야 한다.
+5. prediction_summary와 rule_based evidence는 유지되어야 한다.
+"""
+
+from fastapi.testclient import TestClient
+
+from src.api.artifact_cache import clear_artifact_cache_for_tests
+from src.api.main import app
+
+
+client = TestClient(app)
+
+
+def _sample_payload(
+    *,
+    include_shap: bool = True,
+    include_global_importance: bool = True,
+) -> dict:
+    """
+    테스트에서 반복해서 사용할 정상 입력 sample이다.
+    """
+    return {
+        "air_temperature": 303.0,
+        "process_temperature": 312.5,
+        "rotational_speed": 1380.0,
+        "torque": 62.0,
+        "tool_wear": 220.0,
+        "type": "L",
+        "include_shap": include_shap,
+        "include_global_importance": include_global_importance,
+    }
+
+
+def test_failure_prediction_agent_returns_warning_when_shap_artifact_load_fails(
+    monkeypatch,
+) -> None:
+    """
+    SHAP artifact 로드 실패 테스트.
+
+    기대 동작:
+        API는 500으로 죽지 않는다.
+        prediction은 반환된다.
+        warnings에 SHAP artifact 실패 내용이 들어간다.
+        shap_local evidence는 포함되지 않는다.
+
+    왜 중요한가?
+        SHAP는 부가 설명 기능이다.
+        SHAP 실패 때문에 prediction API 전체가 실패하면 운영 안정성이 떨어진다.
+    """
+    clear_artifact_cache_for_tests()
+
+    def fake_load_shap_artifacts(*args, **kwargs):
+        raise FileNotFoundError("fake shap artifact missing")
+
+    monkeypatch.setattr(
+        "src.api.artifact_cache.load_shap_artifacts",
+        fake_load_shap_artifacts,
+    )
+
+    response = client.post(
+        "/agent/failure-prediction",
+        json=_sample_payload(
+            include_shap=True,
+            include_global_importance=True,
+        ),
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert "prediction" in data
+    assert "probability" in data
+    assert "evidence" in data
+    assert "warnings" in data
+
+    assert len(data["warnings"]) >= 1
+    assert any(
+        "SHAP" in warning or "artifact" in warning
+        for warning in data["warnings"]
+    )
+
+    evidence_types = {
+        item["evidence_type"]
+        for item in data["evidence"]
+    }
+
+    assert "prediction_summary" in evidence_types
+    assert "rule_based" in evidence_types
+    assert "shap_local" not in evidence_types
+
+
+def test_failure_prediction_agent_skips_shap_when_include_shap_false() -> None:
+    """
+    include_shap=false 테스트.
+
+    기대 동작:
+        SHAP 계산을 하지 않는다.
+        shap_local evidence가 없다.
+        prediction은 정상 반환된다.
+    """
+    clear_artifact_cache_for_tests()
+
+    response = client.post(
+        "/agent/failure-prediction",
+        json=_sample_payload(
+            include_shap=False,
+            include_global_importance=False,
+        ),
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    evidence_types = {
+        item["evidence_type"]
+        for item in data["evidence"]
+    }
+
+    assert "prediction_summary" in evidence_types
+    assert "rule_based" in evidence_types
+    assert "shap_local" not in evidence_types
+    assert "global_importance" not in evidence_types
