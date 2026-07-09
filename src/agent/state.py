@@ -270,6 +270,8 @@ class AgentState(TypedDict, total=False):
     # 나중에 로그, LangSmith, OpenTelemetry 등과 연결할 때 유용합니다.
     trace_id: NotRequired[str]
 
+    include_shap: NotRequired[bool]
+    include_global_importance: NotRequired[bool]
 
 def create_initial_agent_state(
     *,

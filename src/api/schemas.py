@@ -169,3 +169,108 @@ class FailurePredictionResponse(BaseModel):
 
     warnings: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
+
+
+# ============================================================
+# Day 14 - LangGraph Agent API Schemas
+# ============================================================
+#
+# Day 10~12의 /agent/failure-prediction endpoint는
+# "정형화된 설비 입력값"을 바로 받아서 prediction service를 호출했습니다.
+#
+# Day 14의 /agent/langgraph-query endpoint는
+# "자연어 질문(question)"을 먼저 받고,
+# 선택적으로 raw_sample을 함께 받습니다.
+#
+# 즉, Day 14 endpoint의 중심은 raw_sample이 아니라 question입니다.
+# raw_sample은 failure_prediction intent일 때만 필요합니다.
+
+from typing import Any
+
+
+class LangGraphRawSampleRequest(BaseModel):
+    """
+    LangGraph Agent가 사용할 수 있는 설비 입력값 schema입니다.
+
+    기존 /agent/failure-prediction endpoint의 입력값과 거의 같지만,
+    여기서는 LangGraph request 안에 중첩되어 들어갑니다.
+
+    예:
+    {
+        "question": "이 설비 조건이면 고장 위험이 높아?",
+        "raw_sample": {
+            "air_temperature": 303.0,
+            "process_temperature": 312.5,
+            "rotational_speed": 1380.0,
+            "torque": 62.0,
+            "tool_wear": 220.0,
+            "type": "L"
+        }
+    }
+    """
+
+    air_temperature: float
+    process_temperature: float
+    rotational_speed: float
+    torque: float
+    tool_wear: float
+    type: str
+
+
+class LangGraphAgentQueryRequest(BaseModel):
+    """
+    /agent/langgraph-query endpoint의 request schema입니다.
+
+    question:
+        사용자의 자연어 질문입니다.
+        LangGraph workflow는 이 question을 보고 intent를 분류합니다.
+
+    raw_sample:
+        선택 입력값입니다.
+        dataset_schema_query나 unknown 질문에는 필요하지 않습니다.
+        failure_prediction 질문일 때만 필요합니다.
+
+    include_shap:
+        prediction을 수행할 때 SHAP local explanation을 포함할지 여부입니다.
+        Day 12 service layer가 이 옵션을 사용할 수 있습니다.
+
+    include_global_importance:
+        prediction을 수행할 때 global importance evidence를 포함할지 여부입니다.
+    """
+
+    question: str
+    raw_sample: LangGraphRawSampleRequest | None = None
+    include_shap: bool = True
+    include_global_importance: bool = True
+
+
+class LangGraphAgentQueryResponse(BaseModel):
+    """
+    /agent/langgraph-query endpoint의 response schema입니다.
+
+    이 response는 LangGraph AgentState에서 나온 값을
+    API 사용자가 보기 좋은 JSON 형태로 정리한 것입니다.
+
+    prediction 관련 필드는 optional입니다.
+    이유:
+        dataset_schema_query나 unknown intent에서는
+        prediction 자체를 수행하지 않기 때문입니다.
+    """
+
+    question: str
+    intent: str
+    confidence: float | None = None
+    intent_source: str | None = None
+    intent_reason: str | None = None
+
+    prediction: int | None = None
+    probability: float | None = None
+    threshold: float | None = None
+    risk_level: str | None = None
+    recommended_action: str | None = None
+
+    answer: str
+    evidence: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    errors: list[str] = []
+    limitations: list[str] = []

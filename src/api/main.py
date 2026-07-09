@@ -23,16 +23,19 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from src.api.failure_agent_api import router as failure_agent_router
-
+from src.api.langgraph_agent_api import router as langgraph_agent_router
 
 app = FastAPI(
-    title="Manufacturing AI Quality Agent Reference API",
-    description="AI4I 기반 설비 고장 예측 + evidence 기반 Agent 응답 API",
-    version="0.12.0",
+    title="Manufacturing AI Quality Agent API",
 )
 
-
+# Day 10~12 기존 endpoint
+# POST /agent/failure-prediction
 app.include_router(failure_agent_router)
+
+# Day 14 새 endpoint
+# POST /agent/langgraph-query
+app.include_router(langgraph_agent_router)
 
 
 @app.exception_handler(RequestValidationError)

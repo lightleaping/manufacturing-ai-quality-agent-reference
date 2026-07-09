@@ -52,6 +52,7 @@ from src.agent.state import (
     AgentState,
     append_error,
     append_warning,
+    create_initial_agent_state,
     has_errors,
     has_raw_sample,
 )
@@ -129,56 +130,86 @@ def classify_intent_node(state: AgentState) -> AgentState:
 
 def call_failure_prediction_node(state: AgentState) -> AgentState:
     """
-    Day 12 failure prediction service를 호출하는 node입니다.
+    failure_prediction intent일 때 Day 12 prediction service를 호출하는 node입니다.
 
-    이 node의 책임
-    --------------
-    intent가 failure_prediction일 때,
-    raw_sample을 사용해 실제 고장 예측 service를 호출합니다.
-
-    중요한 점
-    --------
-    이 node는 직접 모델을 로드하거나 SHAP를 계산하지 않습니다.
-
-    모델 로딩, artifact caching, SHAP fallback, global importance fallback은
-    Day 12에서 만든 failure_agent_service.py가 담당합니다.
-
-    즉, LangGraph node는 service를 호출하고 결과를 state에 저장하는
-    orchestration 역할만 합니다.
+    raw_sample이 없으면 prediction을 수행하지 않습니다.
+    이유:
+    - 고장 예측 모델은 설비 입력값이 있어야 동작할 수 있습니다.
+    - 자연어 질문만으로 probability를 만들어내면 안 됩니다.
     """
 
-    if not has_raw_sample(state):
-        append_error(
-            state,
-            "failure_prediction intent이지만 raw_sample이 없어 모델 예측을 수행할 수 없습니다.",
+    raw_sample = state.get("raw_sample")
+
+    # raw_sample이 None이거나 빈 dict이면
+    # 모델 예측에 필요한 설비 입력값이 없는 상태입니다.
+    #
+    # 자연어 질문만 보고 모델 probability를 임의로 만들면 안 되므로
+    # prediction service를 호출하지 않습니다.
+    #
+    # 이 상황은 failure_prediction workflow를 완료할 수 없는 상태이므로
+    # warnings가 아니라 errors에 기록합니다.
+    #
+    # 이후 route_after_prediction()은 errors가 있는 것을 확인하고
+    # build_fallback_answer_node로 이동합니다.
+    if not raw_sample:
+        state["prediction"] = None
+        state["probability"] = None
+        state["threshold"] = None
+        state["risk_level"] = "UNKNOWN"
+
+        state["recommended_action"] = (
+            "고장 위험 예측을 위해 설비 입력값을 함께 보내주세요."
         )
+
+        state["answer"] = (
+            "고장 위험 예측에는 air_temperature, process_temperature, "
+            "rotational_speed, torque, tool_wear, type 값이 필요합니다."
+        )
+
+        state.setdefault("errors", []).append(
+            "failure_prediction intent이지만 raw_sample이 없어 "
+            "prediction을 수행할 수 없습니다."
+        )
+
         return state
 
-    raw_sample = state["raw_sample"]
-
     try:
-        prediction_result = _run_failure_prediction_service(raw_sample)
-
-        state["prediction"] = prediction_result.get("prediction")
-        state["probability"] = prediction_result.get("probability")
-        state["threshold"] = prediction_result.get("threshold")
-        state["risk_level"] = prediction_result.get("risk_level", "UNKNOWN")
-        state["recommended_action"] = prediction_result.get("recommended_action")
-        state["evidence"] = prediction_result.get("evidence", [])
-        state["answer"] = prediction_result.get("answer", "")
-
-        for warning in prediction_result.get("warnings", []):
-            append_warning(state, str(warning))
-
-        for limitation in prediction_result.get("limitations", []):
-            state.setdefault("limitations", [])
-            state["limitations"].append(str(limitation))
+        # Day 12 prediction service를 실행합니다.
+        #
+        # include_shap과 include_global_importance는
+        # Day 14 FastAPI request에서 전달된 옵션입니다.
+        prediction_result = _run_failure_prediction_service(
+            raw_sample=raw_sample,
+            include_shap=state.get("include_shap", True),
+            include_global_importance=state.get(
+                "include_global_importance",
+                True,
+            ),
+        )
 
     except Exception as exc:
-        append_error(
-            state,
-            f"failure prediction service 호출 중 오류가 발생했습니다: {type(exc).__name__}: {exc}",
+        # prediction service에서 예외가 발생해도
+        # LangGraph workflow 자체를 즉시 종료하지 않습니다.
+        #
+        # 오류를 AgentState에 기록하면
+        # route_after_prediction()이 errors를 확인한 뒤
+        # fallback answer node로 이동할 수 있습니다.
+        state.setdefault("errors", []).append(
+            f"failure prediction service 실행 중 오류가 발생했습니다: {exc}"
         )
+
+        return state
+
+    state["prediction"] = prediction_result.get("prediction")
+    state["probability"] = prediction_result.get("probability")
+    state["threshold"] = prediction_result.get("threshold")
+    state["risk_level"] = prediction_result.get("risk_level")
+    state["recommended_action"] = prediction_result.get("recommended_action")
+    state["answer"] = prediction_result.get("answer", "")
+    state["evidence"] = prediction_result.get("evidence", [])
+    state["warnings"] = prediction_result.get("warnings", [])
+    state["errors"] = prediction_result.get("errors", [])
+    state["limitations"] = prediction_result.get("limitations", [])
 
     return state
 
@@ -433,22 +464,44 @@ def build_failure_agent_graph():
     return graph_builder.compile()
 
 
-def run_failure_agent_graph(state: AgentState) -> AgentState:
+def run_failure_agent_graph(
+    question: str,
+    raw_sample: dict[str, Any] | None = None,
+    include_shap: bool = True,
+    include_global_importance: bool = True,
+) -> AgentState:
     """
-    LangGraph workflow를 실행하는 helper 함수입니다.
+    LangGraph workflow를 실행하는 공개 runner 함수입니다.
 
-    테스트나 demo script에서 매번 graph를 직접 만들지 않도록
-    실행 helper를 제공합니다.
+    FastAPI endpoint는 AgentState 내부 구조를 직접 만들지 않고
+    question과 선택적 raw_sample만 전달합니다.
+
+    runner가 API 입력을 AgentState로 변환하고
+    compiled LangGraph workflow를 실행합니다.
     """
+
+    initial_state = create_initial_agent_state(
+        question=question,
+        raw_sample=raw_sample,
+    )
+
+    initial_state["include_shap"] = include_shap
+    initial_state["include_global_importance"] = (
+        include_global_importance
+    )
 
     graph = build_failure_agent_graph()
 
-    result = graph.invoke(state)
+    final_state = graph.invoke(initial_state)
 
-    return result
+    return final_state
+    
 
-
-def _run_failure_prediction_service(raw_sample: Mapping[str, Any]) -> dict[str, Any]:
+def _run_failure_prediction_service(
+    raw_sample: dict[str, Any],
+    include_shap: bool = True,
+    include_global_importance: bool = True,
+) -> dict[str, Any]:
     """
     Day 12 failure_agent_service를 호출하는 내부 helper입니다.
 
@@ -519,8 +572,9 @@ def _run_failure_prediction_service(raw_sample: Mapping[str, Any]) -> dict[str, 
             "type",
             "Type",
         ),
-        include_shap=True,
-        include_global_importance=True,
+        
+        include_shap=include_shap,
+        include_global_importance=include_global_importance,
     )
 
     response = run_failure_prediction_agent(request=request)

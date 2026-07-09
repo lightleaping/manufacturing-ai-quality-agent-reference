@@ -236,26 +236,46 @@ def test_call_failure_prediction_node_stores_prediction_result(monkeypatch):
     _run_failure_prediction_service를 fake 함수로 교체합니다.
     """
 
-    def fake_run_failure_prediction_service(raw_sample):
+    def fake_run_failure_prediction_service(
+        raw_sample,
+        include_shap=True,
+        include_global_importance=True,
+    ):
+        """
+        Day 14에서 실제 helper 함수에 옵션이 추가되었으므로
+        fake 함수도 같은 매개변수를 받습니다.
+
+        monkeypatch 대상 함수와 fake 함수의 인터페이스가 같아야
+        실제 호출 방식도 테스트할 수 있습니다.
+        """
+
         return {
             "prediction": 1,
             "probability": 0.9929,
             "threshold": 0.7,
             "risk_level": "HIGH",
-            "recommended_action": "고장 위험이 높습니다. 설비 점검을 권장합니다.",
+            "recommended_action": (
+                "고장 위험이 높습니다. 설비 점검을 권장합니다."
+            ),
             "evidence": [
                 {
                     "evidence_id": "prediction_summary_001",
                     "evidence_type": "prediction_summary",
                     "source": "model_prediction",
                     "title": "모델 예측 요약",
-                    "summary": "모델은 고장 probability를 높게 예측했습니다.",
+                    "summary": (
+                        "모델은 고장 probability를 높게 예측했습니다."
+                    ),
                     "severity": "HIGH",
                 }
             ],
             "answer": "고장 위험이 높습니다.",
-            "warnings": ["SHAP 계산은 테스트에서 생략되었습니다."],
-            "limitations": ["SHAP value는 실제 원인 단정이 아닙니다."],
+            "warnings": [
+                "SHAP 계산은 테스트에서 생략되었습니다."
+            ],
+            "limitations": [
+                "SHAP value는 실제 원인 단정이 아닙니다."
+            ],
         }
 
     monkeypatch.setattr(
@@ -298,7 +318,11 @@ def test_call_failure_prediction_node_adds_error_when_service_raises(monkeypatch
     prediction service 호출 중 예외가 발생하면 errors에 기록해야 합니다.
     """
 
-    def fake_run_failure_prediction_service(raw_sample):
+    def fake_run_failure_prediction_service(
+        raw_sample,
+        include_shap=True,
+        include_global_importance=True,
+    ):
         raise RuntimeError("mock service error")
 
     monkeypatch.setattr(
@@ -522,11 +546,9 @@ def test_run_failure_agent_graph_handles_dataset_schema_query(monkeypatch):
         fake_classify_intent,
     )
 
-    state = create_initial_agent_state(
-        question="AI4I 데이터셋 feature와 target은 뭐야?"
+    result = run_failure_agent_graph(
+        question="AI4I 데이터셋 feature와 target은 뭐야?",
     )
-
-    result = run_failure_agent_graph(state)
 
     assert result["intent"] == "dataset_schema_query"
     assert "AI4I 2020 Predictive Maintenance Dataset" in result["answer"]
@@ -555,11 +577,9 @@ def test_run_failure_agent_graph_handles_unknown_intent(monkeypatch):
         fake_classify_intent,
     )
 
-    state = create_initial_agent_state(
-        question="오늘 점심 메뉴 추천해줘."
+    result = run_failure_agent_graph(
+        question="오늘 점심 메뉴 추천해줘.",
     )
-
-    result = run_failure_agent_graph(state)
 
     assert result["intent"] == "unknown"
     assert "지원하는 작업으로 분류되지 않았습니다" in result["answer"]
@@ -583,13 +603,27 @@ def test_run_failure_agent_graph_handles_failure_prediction(monkeypatch):
             error=None,
         )
 
-    def fake_run_failure_prediction_service(raw_sample):
+    def fake_run_failure_prediction_service(
+        raw_sample,
+        include_shap=True,
+        include_global_importance=True,
+    ):
+        """
+        Day 14에서 실제 helper 함수에 옵션이 추가되었으므로
+        fake 함수도 같은 매개변수를 받습니다.
+
+        monkeypatch 대상 함수와 fake 함수의 인터페이스가 같아야
+        실제 호출 방식도 테스트할 수 있습니다.
+        """
+
         return {
             "prediction": 1,
             "probability": 0.9929,
             "threshold": 0.7,
             "risk_level": "HIGH",
-            "recommended_action": "고장 위험이 높습니다. 설비 점검을 권장합니다.",
+            "recommended_action": (
+                "고장 위험이 높습니다. 설비 점검을 권장합니다."
+            ),
             "evidence": [],
             "answer": "고장 위험이 높습니다.",
             "warnings": [],
@@ -617,12 +651,12 @@ def test_run_failure_agent_graph_handles_failure_prediction(monkeypatch):
         "type": "L",
     }
 
-    state = create_initial_agent_state(
+    result = run_failure_agent_graph(
         question="이 설비 조건이면 고장 위험이 높아?",
         raw_sample=raw_sample,
+        include_shap=True,
+        include_global_importance=True,
     )
-
-    result = run_failure_agent_graph(state)
 
     assert result["intent"] == "failure_prediction"
     assert result["prediction"] == 1
@@ -655,11 +689,9 @@ def test_run_failure_agent_graph_falls_back_when_failure_prediction_has_no_raw_s
         fake_classify_intent,
     )
 
-    state = create_initial_agent_state(
-        question="이 설비 조건이면 고장 위험이 높아?"
+    result = run_failure_agent_graph(
+        question="이 설비 조건이면 고장 위험이 높아?",
     )
-
-    result = run_failure_agent_graph(state)
 
     assert result["intent"] == "failure_prediction"
     assert len(result["errors"]) == 1

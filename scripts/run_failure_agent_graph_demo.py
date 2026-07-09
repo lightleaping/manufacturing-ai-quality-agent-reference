@@ -91,11 +91,9 @@ def run_dataset_schema_demo() -> None:
 
     print_header("Case 1 - Dataset schema query")
 
-    state = create_initial_agent_state(
-        question="AI4I 데이터셋 feature와 target은 뭐야?"
+    result = run_failure_agent_graph(
+        question="AI4I 데이터셋 feature와 target은 뭐야?",
     )
-
-    result = run_failure_agent_graph(state)
 
     print_state_summary(result)
 
@@ -117,11 +115,9 @@ def run_unknown_intent_demo() -> None:
 
     print_header("Case 2 - Unknown intent")
 
-    state = create_initial_agent_state(
-        question="오늘 점심 메뉴 추천해줘."
+    result = run_failure_agent_graph(
+        question="오늘 점심 메뉴 추천해줘.",
     )
-
-    result = run_failure_agent_graph(state)
 
     print_state_summary(result)
 
@@ -173,12 +169,12 @@ def run_failure_prediction_demo() -> None:
         "type": "L",
     }
 
-    state = create_initial_agent_state(
+    result = run_failure_agent_graph(
         question="이 설비 조건이면 고장 위험이 높아?",
         raw_sample=raw_sample,
+        include_shap=True,
+        include_global_importance=True,
     )
-
-    result = run_failure_agent_graph(state)
 
     print_state_summary(result)
 
