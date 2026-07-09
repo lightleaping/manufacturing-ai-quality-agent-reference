@@ -316,6 +316,12 @@ def convert_shap_local_evidence(
 
     현재 FailureMLP는 마지막에 Sigmoid가 없으므로 raw output은 logit입니다.
     따라서 SHAP contribution은 probability가 아니라 logit 기준 contribution입니다.
+
+    주의:
+    - SHAP는 실제 고장의 물리적 원인을 단정하지 않습니다.
+    - rule_based evidence와 SHAP local evidence는 의미가 다릅니다.
+    - summary에는 중복 문장을 넣지 않고,
+      원본 reason은 metadata["raw_shap_evidence"] 안에 보존합니다.
     """
     contributions = _extract_shap_contributions(shap_local_explanation)
 
@@ -345,9 +351,6 @@ def convert_shap_local_evidence(
             f"SHAP contribution={contribution:.4f}입니다."
         )
 
-        if reason:
-            summary = f"{summary} {reason}"
-
         converted.append(
             AgentEvidence(
                 evidence_id=f"shap_local_{index:03d}",
@@ -359,14 +362,20 @@ def convert_shap_local_evidence(
                 value=value,
                 direction=str(direction),
                 contribution=contribution,
-                importance=_safe_float(global_importance, default=0.0)
-                if global_importance is not None
-                else None,
+                importance=_safe_float(global_importance),
                 severity="UNKNOWN",
                 metadata={
                     "reference_value": reference_value,
                     "global_importance": global_importance,
-                    "raw_shap_evidence": item,
+                    "raw_shap_evidence": {
+                        "feature": feature,
+                        "value": value,
+                        "contribution": contribution,
+                        "direction": direction,
+                        "reference_value": reference_value,
+                        "global_importance": global_importance,
+                        "reason": reason,
+                    },
                     "important_note": (
                         "SHAP contribution은 실제 고장의 물리적 원인 단정이 아니라 "
                         "현재 모델 output에 대한 feature contribution입니다."
