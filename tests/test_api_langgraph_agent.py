@@ -1,3 +1,5 @@
+import pytest
+
 from fastapi.testclient import TestClient
 
 from src.api.main import app
@@ -5,6 +7,187 @@ from src.api.main import app
 
 client = TestClient(app)
 
+# =============================================================================
+# Day 19 - API 테스트용 Persistence 격리
+# =============================================================================
+
+
+@pytest.fixture(
+    autouse=True,
+)
+def disable_real_execution_history_storage(
+    monkeypatch,
+):
+    """
+    모든 API 테스트에서 실제 SQLite DB 저장을 차단합니다.
+
+    왜 autouse=True를 사용하는가?
+    -----------------------------
+    Day 19부터:
+
+        POST /agent/langgraph-query
+
+    endpoint는 LangGraph 실행 후
+    자동으로 insert_execution()을 호출합니다.
+
+    기존 Day 14~16 테스트는
+    LangGraph runner만 fake 함수로 교체했습니다.
+
+    따라서 Persistence를 별도로 차단하지 않으면:
+
+        실제 운영 DB 접근
+
+        또는
+
+        trace_id가 없는 기존 fake state 저장 실패
+
+        또는
+
+        기존 warnings 응답 변경
+
+    문제가 생길 수 있습니다.
+
+
+    autouse=True
+    ------------
+    각 테스트 함수가 fixture 이름을
+    매개변수로 직접 적지 않아도
+    pytest가 모든 테스트에 자동 적용합니다.
+
+
+    왜 _save_execution_history_safely() 전체가 아니라
+    insert_execution()만 교체하는가?
+    --------------------------------
+    API endpoint의 저장 helper 흐름은 유지하면서
+    실제 SQLite 쓰기만 막기 위해서입니다.
+
+    흐름:
+
+        _save_execution_history_safely()
+
+        -> fake_insert_execution()
+
+        -> 실제 DB 접근 없음
+
+
+    Day 19 저장 동작을 검증하는 개별 테스트에서는
+    monkeypatch를 다시 적용하여:
+
+        저장 호출 기록
+
+        저장 오류 발생
+
+    동작을 각각 검증합니다.
+    """
+
+    def fake_insert_execution(
+        *,
+        state,
+        db_path=None,
+    ):
+        """
+        실제 SQLite에 저장하지 않는
+        테스트 기본 fake 함수입니다.
+        """
+
+        # 실제 insert_execution()과 같은 의미로
+        # 가상의 내부 execution id를 반환합니다.
+        return 1
+
+    monkeypatch.setattr(
+        (
+            "src.api.langgraph_agent_api."
+            "insert_execution"
+        ),
+        fake_insert_execution,
+    )
+
+def build_day19_api_test_state(
+    *,
+    question=(
+        "이 설비의 고장 위험을 예측해줘."
+    ),
+    trace_id=(
+        "day19-api-trace-001"
+    ),
+):
+    """
+    Day 19 API Persistence 테스트에서 사용할
+    완성된 final AgentState 형태의 dict를 만듭니다.
+
+    실제 OpenAI:
+
+        호출하지 않음
+
+    실제 LangGraph:
+
+        실행하지 않음
+
+    실제 PyTorch:
+
+        실행하지 않음
+
+    Persistence 연결 정책만 검증하기 위한
+    고정 테스트 데이터입니다.
+    """
+
+    return {
+        "question": question,
+
+        "intent": "failure_prediction",
+
+        "confidence": 0.95,
+
+        "intent_source": "openai",
+
+        "intent_reason": (
+            "사용자가 설비 고장 위험 "
+            "예측을 요청했습니다."
+        ),
+
+        "prediction": 1,
+
+        "probability": 0.9929,
+
+        "threshold": 0.7,
+
+        "risk_level": "HIGH",
+
+        "recommended_action": (
+            "설비 점검을 권장합니다."
+        ),
+
+        "answer": (
+            "현재 입력 기준 "
+            "고장 위험이 높습니다."
+        ),
+
+        "evidence": [],
+
+        "warnings": [],
+
+        "errors": [],
+
+        "limitations": [],
+
+        "trace_id": trace_id,
+
+        "trace_status": "success",
+
+        "trace_started_at": (
+            "2026-07-10T05:00:00+00:00"
+        ),
+
+        "trace_finished_at": (
+            "2026-07-10T05:00:02+00:00"
+        ),
+
+        "trace_duration_ms": 2000.0,
+
+        "fallback_occurred": False,
+
+        "trace_events": [],
+    }
 
 def test_langgraph_query_api_returns_dataset_schema_answer(monkeypatch):
     """
@@ -1404,4 +1587,667 @@ def test_openapi_schema_includes_langgraph_trace_fields():
             "#/components/schemas/"
             "TraceEventResponse"
         )
+    )
+
+# =============================================================================
+# Day 19 - Agent Execution History API 테스트
+# =============================================================================
+
+
+def test_langgraph_query_api_saves_final_agent_state(
+    monkeypatch,
+):
+    """
+    POST /agent/langgraph-query 실행 후
+    final AgentState가 Persistence 계층으로
+    전달되는지 확인합니다.
+
+    검증 흐름:
+
+        HTTP POST
+
+        -> fake LangGraph runner
+
+        -> final AgentState
+
+        -> insert_execution(
+               state=final_state
+           )
+
+        -> HTTP 200
+    """
+
+    state = (
+        build_day19_api_test_state()
+    )
+
+    captured = {}
+
+    def fake_run_failure_agent_graph(
+        question,
+        raw_sample=None,
+        include_shap=True,
+        include_global_importance=True,
+        *,
+        chat_history=None,
+    ):
+        return state
+
+    def fake_insert_execution(
+        *,
+        state,
+        db_path=None,
+    ):
+        # endpoint가 Persistence에 전달한
+        # 최종 State를 저장합니다.
+        captured["state"] = state
+
+        # 실제 SQLite 내부 id를 흉내 냅니다.
+        return 101
+
+    monkeypatch.setattr(
+        (
+            "src.api.langgraph_agent_api."
+            "run_failure_agent_graph"
+        ),
+        fake_run_failure_agent_graph,
+    )
+
+    # autouse fixture가 적용한 기본 fake를
+    # 이 테스트 전용 fake로 다시 교체합니다.
+    monkeypatch.setattr(
+        (
+            "src.api.langgraph_agent_api."
+            "insert_execution"
+        ),
+        fake_insert_execution,
+    )
+
+    response = client.post(
+        "/agent/langgraph-query",
+        json={
+            "question": (
+                "이 설비의 고장 위험을 "
+                "예측해줘."
+            ),
+        },
+    )
+
+    assert response.status_code == 200
+
+    # insert_execution()이 호출되어야 합니다.
+    assert "state" in captured
+
+    # LangGraph가 만든 final State가
+    # Persistence까지 전달되어야 합니다.
+    assert (
+        captured["state"]["trace_id"]
+        ==
+        "day19-api-trace-001"
+    )
+
+    assert (
+        captured["state"]["intent"]
+        ==
+        "failure_prediction"
+    )
+
+    assert (
+        captured["state"]["prediction"]
+        ==
+        1
+    )
+
+    assert (
+        captured["state"]["probability"]
+        ==
+        0.9929
+    )
+
+    data = response.json()
+
+    # 저장 기능을 추가해도
+    # 기존 Agent 결과는 정상 반환됩니다.
+    assert data["intent"] == (
+        "failure_prediction"
+    )
+
+    assert data["prediction"] == 1
+
+    assert data["trace_id"] == (
+        "day19-api-trace-001"
+    )
+
+
+def test_langgraph_query_api_keeps_response_when_storage_fails(
+    monkeypatch,
+):
+    """
+    Agent 실행은 성공했지만
+    SQLite 저장이 실패한 경우:
+
+        HTTP 500으로 바꾸지 않음
+
+        기존 Agent 결과 유지
+
+        Persistence warning 추가
+
+    정책을 검증합니다.
+    """
+
+    state = (
+        build_day19_api_test_state(
+            trace_id=(
+                "day19-storage-failure-trace"
+            ),
+        )
+    )
+
+    def fake_run_failure_agent_graph(
+        question,
+        raw_sample=None,
+        include_shap=True,
+        include_global_importance=True,
+        *,
+        chat_history=None,
+    ):
+        return state
+
+    def fake_insert_execution(
+        *,
+        state,
+        db_path=None,
+    ):
+        # SQLite 파일 권한 오류 등의
+        # Persistence 실패를 흉내 냅니다.
+        raise RuntimeError(
+            "test SQLite storage failure"
+        )
+
+    monkeypatch.setattr(
+        (
+            "src.api.langgraph_agent_api."
+            "run_failure_agent_graph"
+        ),
+        fake_run_failure_agent_graph,
+    )
+
+    monkeypatch.setattr(
+        (
+            "src.api.langgraph_agent_api."
+            "insert_execution"
+        ),
+        fake_insert_execution,
+    )
+
+    response = client.post(
+        "/agent/langgraph-query",
+        json={
+            "question": (
+                "이 설비의 고장 위험을 "
+                "예측해줘."
+            ),
+        },
+    )
+
+    # DB 저장 실패 때문에
+    # Agent 응답 전체가 실패하면 안 됩니다.
+    assert response.status_code == 200
+
+    data = response.json()
+
+    # 기존 Agent 결과는 유지됩니다.
+    assert data["prediction"] == 1
+
+    assert data["probability"] == 0.9929
+
+    assert data["risk_level"] == "HIGH"
+
+    assert (
+        data["answer"]
+        ==
+        "현재 입력 기준 "
+        "고장 위험이 높습니다."
+    )
+
+    # 저장 실패는 warning으로 확인할 수 있습니다.
+    assert any(
+        (
+            "SQLite"
+            in warning
+        )
+        for warning in data[
+            "warnings"
+        ]
+    )
+
+
+def test_get_agent_executions_returns_recent_summary(
+    monkeypatch,
+):
+    """
+    GET /agent/executions가
+    최근 실행 요약 목록을 반환하는지 확인합니다.
+    """
+
+    captured = {}
+
+    def fake_list_recent_executions(
+        *,
+        limit=20,
+        db_path=None,
+    ):
+        captured["limit"] = limit
+
+        return [
+            {
+                "id": 3,
+
+                "trace_id": (
+                    "recent-trace-003"
+                ),
+
+                "question": (
+                    "세 번째 실행 질문"
+                ),
+
+                "intent": (
+                    "failure_prediction"
+                ),
+
+                "intent_source": "openai",
+
+                "confidence": 0.95,
+
+                "selected_route": "final",
+
+                "prediction": 1,
+
+                "probability": 0.93,
+
+                "threshold": 0.7,
+
+                "risk_level": "HIGH",
+
+                "trace_status": "success",
+
+                "fallback_occurred": False,
+
+                "trace_duration_ms": 2300.0,
+
+                "warning_count": 0,
+
+                "error_count": 0,
+
+                "created_at": (
+                    "2026-07-10T05:03:00"
+                    "+00:00"
+                ),
+            },
+            {
+                "id": 2,
+
+                "trace_id": (
+                    "recent-trace-002"
+                ),
+
+                "question": (
+                    "두 번째 실행 질문"
+                ),
+
+                "intent": (
+                    "dataset_schema_query"
+                ),
+
+                "intent_source": "openai",
+
+                "confidence": 0.92,
+
+                "selected_route": "final",
+
+                "prediction": None,
+
+                "probability": None,
+
+                "threshold": None,
+
+                "risk_level": None,
+
+                "trace_status": "success",
+
+                "fallback_occurred": False,
+
+                "trace_duration_ms": 1800.0,
+
+                "warning_count": 0,
+
+                "error_count": 0,
+
+                "created_at": (
+                    "2026-07-10T05:02:00"
+                    "+00:00"
+                ),
+            },
+        ]
+
+    monkeypatch.setattr(
+        (
+            "src.api.langgraph_agent_api."
+            "list_recent_executions"
+        ),
+        fake_list_recent_executions,
+    )
+
+    response = client.get(
+        "/agent/executions",
+        params={
+            "limit": 2,
+        },
+    )
+
+    assert response.status_code == 200
+
+    # Query parameter가 Persistence 함수까지
+    # 정상 전달되어야 합니다.
+    assert captured["limit"] == 2
+
+    data = response.json()
+
+    assert len(data) == 2
+
+    assert (
+        data[0]["trace_id"]
+        ==
+        "recent-trace-003"
+    )
+
+    assert data[0]["id"] == 3
+
+    assert data[0]["probability"] == 0.93
+
+    assert (
+        data[1]["trace_id"]
+        ==
+        "recent-trace-002"
+    )
+
+    # 목록 response에는
+    # 상세 JSON 데이터가 없어야 합니다.
+    assert "evidence" not in data[0]
+
+    assert "trace_events" not in data[0]
+
+    assert "raw_sample" not in data[0]
+
+
+def test_get_agent_execution_detail_returns_full_history(
+    monkeypatch,
+):
+    """
+    GET /agent/executions/{trace_id}가
+    특정 실행의 상세 이력을 반환하는지 확인합니다.
+    """
+
+    def fake_get_execution_by_trace_id(
+        *,
+        trace_id,
+        db_path=None,
+    ):
+        assert (
+            trace_id
+            ==
+            "detail-trace-001"
+        )
+
+        return {
+            "id": 1,
+
+            "trace_id": (
+                "detail-trace-001"
+            ),
+
+            "question": (
+                "이 설비의 고장 위험을 "
+                "예측해줘."
+            ),
+
+            "intent": (
+                "failure_prediction"
+            ),
+
+            "intent_source": "openai",
+
+            "confidence": 0.95,
+
+            "intent_reason": (
+                "고장 위험 예측 요청입니다."
+            ),
+
+            "selected_route": "final",
+
+            "prediction": 1,
+
+            "probability": 0.9929,
+
+            "threshold": 0.7,
+
+            "risk_level": "HIGH",
+
+            "recommended_action": (
+                "설비 점검을 권장합니다."
+            ),
+
+            "answer": (
+                "현재 고장 위험이 높습니다."
+            ),
+
+            "trace_status": "success",
+
+            "trace_started_at": (
+                "2026-07-10T05:00:00"
+                "+00:00"
+            ),
+
+            "trace_finished_at": (
+                "2026-07-10T05:00:02"
+                "+00:00"
+            ),
+
+            "fallback_occurred": False,
+
+            "trace_duration_ms": 2000.0,
+
+            "warning_count": 1,
+
+            "error_count": 0,
+
+            "raw_sample": {
+                "Torque [Nm]": 62.0,
+            },
+
+            "evidence": [
+                {
+                    "feature": (
+                        "Torque [Nm]"
+                    ),
+                    "value": 62.0,
+                }
+            ],
+
+            "trace_events": [],
+
+            "warnings": [
+                "테스트 warning"
+            ],
+
+            "errors": [],
+
+            "limitations": [],
+
+            "created_at": (
+                "2026-07-10T05:00:03"
+                "+00:00"
+            ),
+        }
+
+    monkeypatch.setattr(
+        (
+            "src.api.langgraph_agent_api."
+            "get_execution_by_trace_id"
+        ),
+        fake_get_execution_by_trace_id,
+    )
+
+    response = client.get(
+        (
+            "/agent/executions/"
+            "detail-trace-001"
+        )
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert (
+        data["trace_id"]
+        ==
+        "detail-trace-001"
+    )
+
+    assert data["prediction"] == 1
+
+    assert data["probability"] == 0.9929
+
+    assert (
+        data["raw_sample"][
+            "Torque [Nm]"
+        ]
+        ==
+        62.0
+    )
+
+    assert len(
+        data["evidence"]
+    ) == 1
+
+    assert data["warnings"] == [
+        "테스트 warning"
+    ]
+
+
+def test_get_agent_execution_detail_returns_404_when_not_found(
+    monkeypatch,
+):
+    """
+    존재하지 않는 trace_id를 조회하면
+    HTTP 404를 반환하는지 확인합니다.
+    """
+
+    def fake_get_execution_by_trace_id(
+        *,
+        trace_id,
+        db_path=None,
+    ):
+        return None
+
+    monkeypatch.setattr(
+        (
+            "src.api.langgraph_agent_api."
+            "get_execution_by_trace_id"
+        ),
+        fake_get_execution_by_trace_id,
+    )
+
+    response = client.get(
+        (
+            "/agent/executions/"
+            "not-existing-trace"
+        )
+    )
+
+    assert response.status_code == 404
+
+    data = response.json()
+
+    assert (
+        "not-existing-trace"
+        in data["detail"]
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid_limit",
+    [
+        0,
+        101,
+    ],
+)
+def test_get_agent_executions_rejects_invalid_limit(
+    invalid_limit,
+):
+    """
+    GET /agent/executions의 limit은
+
+        최소 1
+
+        최대 100
+
+    범위를 벗어나면
+    HTTP 422를 반환해야 합니다.
+    """
+
+    response = client.get(
+        "/agent/executions",
+        params={
+            "limit": invalid_limit,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_openapi_schema_includes_execution_history_endpoints():
+    """
+    Day 19 실행 이력 endpoint와
+    response schema가 OpenAPI에
+    등록됐는지 확인합니다.
+    """
+
+    response = client.get(
+        "/openapi.json"
+    )
+
+    assert response.status_code == 200
+
+    openapi_schema = response.json()
+
+    paths = openapi_schema["paths"]
+
+    assert (
+        "/agent/executions"
+        in paths
+    )
+
+    assert (
+        "/agent/executions/{trace_id}"
+        in paths
+    )
+
+    schemas = (
+        openapi_schema[
+            "components"
+        ][
+            "schemas"
+        ]
+    )
+
+    assert (
+        "AgentExecutionSummaryResponse"
+        in schemas
+    )
+
+    assert (
+        "AgentExecutionDetailResponse"
+        in schemas
     )

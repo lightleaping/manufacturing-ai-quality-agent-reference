@@ -10,3 +10,8 @@ models/*.pt
 reports/*.json
 
 .env
+
+# Runtime SQLite databases
+data/runtime/*.db
+data/runtime/*.db-shm
+data/runtime/*.db-wal

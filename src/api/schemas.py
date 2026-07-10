@@ -983,3 +983,420 @@ class LangGraphAgentQueryResponse(BaseModel):
             "Ordered LangGraph node and route trace events."
         ),
     )
+
+# ============================================================
+# Day 19 - Agent Execution History Response Schemas
+# ============================================================
+#
+# Day 19에서는 LangGraph Agent 실행 결과를
+# SQLite agent_executions table에 저장합니다.
+#
+# 저장된 실행 이력은 다음 endpoint에서 조회할 예정입니다.
+#
+# 최근 실행 목록:
+#
+#     GET /agent/executions
+#
+# 특정 실행 상세:
+#
+#     GET /agent/executions/{trace_id}
+#
+#
+# 목록과 상세 schema를 분리하는 이유
+# ----------------------------------
+#
+# 최근 실행 목록은 여러 실행 이력을 한 번에 반환합니다.
+#
+# 따라서 다음과 같이 크기가 클 수 있는 데이터는
+# 목록 응답에서 제외합니다.
+#
+#     raw_sample
+#
+#     evidence
+#
+#     trace_events
+#
+#     warnings 전체 내용
+#
+#     errors 전체 내용
+#
+#
+# 상세 조회는 trace_id 한 건만 반환하므로
+# SQLite에 저장한 전체 실행 정보를 포함합니다.
+#
+# 목록:
+#
+#     작은 요약 데이터
+#
+# 상세:
+#
+#     전체 실행 데이터
+
+
+class AgentExecutionSummaryResponse(BaseModel):
+    """
+    최근 Agent 실행 목록의 항목 한 개를 표현합니다.
+
+    사용 endpoint:
+
+        GET /agent/executions
+
+    반환 예:
+
+        {
+            "id": 3,
+            "trace_id": "abc123",
+            "question": "이 설비의 고장 위험을 예측해줘.",
+            "intent": "failure_prediction",
+            "intent_source": "openai",
+            "confidence": 0.95,
+            "selected_route": "final",
+            "prediction": 1,
+            "probability": 0.9929,
+            "threshold": 0.7,
+            "risk_level": "HIGH",
+            "trace_status": "success",
+            "fallback_occurred": false,
+            "trace_duration_ms": 2450.2,
+            "warning_count": 0,
+            "error_count": 0,
+            "created_at": "2026-07-10T04:30:00+00:00"
+        }
+
+
+    왜 evidence와 trace_events가 없는가?
+    ----------------------------------
+    목록 endpoint는 여러 실행의 상태를
+    빠르게 확인하는 용도입니다.
+
+    전체 evidence와 trace event는
+    특정 trace_id 상세 endpoint에서 조회합니다.
+    """
+
+    # SQLite 내부 실행 이력 ID입니다.
+    #
+    # agent_executions table:
+    #
+    #     id INTEGER
+    #        PRIMARY KEY
+    #        AUTOINCREMENT
+    #
+    # 첫 번째 실행:
+    #
+    #     1
+    #
+    # 두 번째 실행:
+    #
+    #     2
+    id: int = Field(
+        ...,
+        ge=1,
+        description=(
+            "SQLite internal execution history ID."
+        ),
+        examples=[1],
+    )
+
+    # LangGraph 실행 한 건을 구분하는 고유 ID입니다.
+    #
+    # FastAPI 상세 조회에서도 사용합니다.
+    #
+    # 예:
+    #
+    # GET /agent/executions/
+    # 908759dd97bd4a3eb7494b68f76f871c
+    trace_id: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Unique LangGraph execution trace ID."
+        ),
+        examples=[
+            "908759dd97bd4a3eb7494b68f76f871c"
+        ],
+    )
+
+    # 사용자가 현재 요청에서 입력한 질문입니다.
+    #
+    # Day 19 초기 정책에서는 question 원문을 저장합니다.
+    #
+    # 운영 환경에서는:
+    #
+    # 개인정보 마스킹
+    #
+    # 접근 권한
+    #
+    # 보존 기간
+    #
+    # 정책이 추가로 필요합니다.
+    question: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Original user question stored "
+            "for this Agent execution."
+        ),
+    )
+
+    # OpenAI 또는 fallback classifier가 판단한 intent입니다.
+    #
+    # 일부 비정상 또는 과거 데이터에서는
+    # 값이 없을 가능성을 고려하여 None을 허용합니다.
+    intent: str | None = None
+
+    # Intent 분류 출처입니다.
+    #
+    # 예:
+    #
+    # openai
+    #
+    # rule_based
+    #
+    # fallback
+    #
+    # validation
+    intent_source: str | None = None
+
+    # Intent 분류 신뢰도입니다.
+    #
+    # 값이 있다면 일반적으로:
+    #
+    # 0.0 ~ 1.0
+    confidence: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+    )
+
+    # final AgentState에 마지막으로 남아 있던
+    # selected_route 값입니다.
+    #
+    # 주의:
+    #
+    # 전체 실행 route 순서를 의미하지 않습니다.
+    #
+    # 전체 route 흐름은
+    # 상세 응답의 trace_events에서 확인합니다.
+    selected_route: str | None = None
+
+    # PyTorch 모델의 최종 고장 예측입니다.
+    #
+    # 0:
+    #
+    # 정상 예측
+    #
+    # 1:
+    #
+    # 고장 위험 예측
+    #
+    # None:
+    #
+    # prediction을 수행하지 않은 실행
+    prediction: int | None = None
+
+    # PyTorch 모델이 계산한 고장 probability입니다.
+    #
+    # OpenAI가 생성한 확률이 아닙니다.
+    probability: float | None = None
+
+    # prediction 0·1 판단에 사용한 threshold입니다.
+    threshold: float | None = None
+
+    # 사람이 이해하기 쉬운 위험 등급입니다.
+    #
+    # 예:
+    #
+    # LOW
+    #
+    # MEDIUM
+    #
+    # HIGH
+    #
+    # UNKNOWN
+    risk_level: str | None = None
+
+    # 전체 LangGraph workflow의 최종 상태입니다.
+    trace_status: (
+        Literal[
+            "running",
+            "success",
+            "fallback",
+            "error",
+        ]
+        |
+        None
+    ) = None
+
+    # LangGraph가 실제 fallback route 또는
+    # fallback answer를 사용했는지 나타냅니다.
+    fallback_occurred: bool = False
+
+    # 전체 LangGraph workflow 실행시간입니다.
+    #
+    # 단위:
+    #
+    # millisecond
+    trace_duration_ms: float | None = Field(
+        default=None,
+        ge=0.0,
+    )
+
+    # AgentState warnings 목록의 개수입니다.
+    #
+    # warnings 전체 문자열은 상세 조회에서 반환합니다.
+    warning_count: int = Field(
+        default=0,
+        ge=0,
+    )
+
+    # AgentState errors 목록의 개수입니다.
+    #
+    # errors 전체 문자열은 상세 조회에서 반환합니다.
+    error_count: int = Field(
+        default=0,
+        ge=0,
+    )
+
+    # SQLite 실행 이력 record가 생성된 UTC 시각입니다.
+    #
+    # 현재 프로젝트의 trace 시각 필드와 동일하게
+    # ISO 8601 문자열로 반환합니다.
+    created_at: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "UTC time when the SQLite execution "
+            "history record was created."
+        ),
+        examples=[
+            "2026-07-10T04:30:00.120000+00:00"
+        ],
+    )
+
+
+class AgentExecutionDetailResponse(
+    AgentExecutionSummaryResponse
+):
+    """
+    trace_id 기준 Agent 실행 상세 응답입니다.
+
+    사용 endpoint:
+
+        GET /agent/executions/{trace_id}
+
+    AgentExecutionSummaryResponse를 상속하므로
+    목록 요약 필드를 모두 포함합니다.
+
+    추가 상세 필드:
+
+        intent_reason
+
+        recommended_action
+
+        answer
+
+        trace_started_at
+
+        trace_finished_at
+
+        raw_sample
+
+        evidence
+
+        trace_events
+
+        warnings
+
+        errors
+
+        limitations
+
+
+    왜 상속을 사용하는가?
+    --------------------
+    상세 응답은 요약 응답의 모든 필드를 포함합니다.
+
+    같은 필드를 다시 반복해서 작성하면:
+
+        중복 코드 증가
+
+        필드 변경 시 두 class 수정
+
+        타입 불일치 가능성
+
+    문제가 생길 수 있습니다.
+
+    따라서:
+
+        AgentExecutionSummaryResponse
+
+                    ↓ 상속
+
+        AgentExecutionDetailResponse
+
+    구조를 사용합니다.
+    """
+
+    # Intent를 그렇게 판단한 이유입니다.
+    #
+    # Day 13 OpenAI intent classifier의
+    # 구조화 결과 중 하나입니다.
+    intent_reason: str | None = None
+
+    # 모델 결과에 따른 권장 조치입니다.
+    recommended_action: str | None = None
+
+    # 최종 Agent 답변입니다.
+    answer: str | None = None
+
+    # 전체 LangGraph trace 시작 UTC 시각입니다.
+    trace_started_at: str | None = None
+
+    # 전체 LangGraph trace 종료 UTC 시각입니다.
+    trace_finished_at: str | None = None
+
+    # 실제 PyTorch prediction에 사용한
+    # 설비 입력값입니다.
+    #
+    # dataset_schema_query 또는 unknown 실행에서는
+    # raw_sample이 없을 수 있으므로 None을 허용합니다.
+    raw_sample: (
+        dict[str, Any]
+        |
+        None
+    ) = None
+
+    # Agent evidence 전체 목록입니다.
+    #
+    # 현재 Persistence 계층에서는
+    # evidence_json TEXT로 저장한 뒤
+    # 조회 시 list[dict]로 역직렬화합니다.
+    evidence: list[
+        dict[str, Any]
+    ] = Field(
+        default_factory=list
+    )
+
+    # Day 16 구조화 Trace event 목록입니다.
+    #
+    # 기존 TraceEventResponse schema를 재사용합니다.
+    trace_events: list[
+        TraceEventResponse
+    ] = Field(
+        default_factory=list
+    )
+
+    # Agent 실행 중 생성된 warning 전체 내용입니다.
+    warnings: list[str] = Field(
+        default_factory=list
+    )
+
+    # Agent 실행 중 생성된 error 전체 내용입니다.
+    errors: list[str] = Field(
+        default_factory=list
+    )
+
+    # 현재 모델·Agent의 한계 설명입니다.
+    limitations: list[str] = Field(
+        default_factory=list
+    )

@@ -1,6 +1,12 @@
+import logging
+
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import (
+    APIRouter,
+    HTTPException,
+    Query,
+)
 
 from src.agent.failure_agent_graph import (
     run_failure_agent_graph,
@@ -8,12 +14,50 @@ from src.agent.failure_agent_graph import (
 from src.agent.state import (
     AgentState,
     ChatMessage,
+    append_warning,
 )
 from src.api.schemas import (
+    AgentExecutionDetailResponse,
+    AgentExecutionSummaryResponse,
     LangGraphAgentQueryRequest,
     LangGraphAgentQueryResponse,
 )
+from src.persistence.execution_history import (
+    get_execution_by_trace_id,
+    insert_execution,
+    list_recent_executions,
+)
 
+# ---------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------
+
+# __name__은 현재 Python module 이름입니다.
+#
+# 현재 module:
+#
+# src.api.langgraph_agent_api
+#
+# logger를 사용하면 Persistence 저장 실패를
+# 사용자 질문·raw_sample 전체를 출력하지 않고
+# 서버 로그에 기록할 수 있습니다.
+#
+# 보안상 다음 값은 로그에 출력하지 않습니다.
+#
+#     OpenAI API key
+#
+#     환경 변수 전체
+#
+#     사용자 question 원문
+#
+#     raw_sample 전체
+#
+#     chat_history 전체
+#
+# 저장 실패 로그에는 trace_id만 사용합니다.
+logger = logging.getLogger(
+    __name__
+)
 
 # APIRouter는 FastAPI endpoint들을 묶는 작은 라우터입니다.
 #
@@ -21,6 +65,133 @@ from src.api.schemas import (
 # 이 파일에 정의된 endpoint가 전체 FastAPI app에 등록됩니다.
 router = APIRouter()
 
+# ---------------------------------------------------------------------
+# Day 19 - Agent 실행 이력 안전 저장
+# ---------------------------------------------------------------------
+
+def _save_execution_history_safely(
+    *,
+    state: AgentState,
+) -> None:
+    """
+    final AgentState를 SQLite에 저장합니다.
+
+    저장 성공:
+
+        별도 반환값 없이 정상 종료
+
+    저장 실패:
+
+        서버 로그 기록
+
+        AgentState warnings에 안내 추가
+
+        예외를 endpoint 밖으로 다시 전달하지 않음
+
+
+    왜 저장 실패 예외를 다시 발생시키지 않는가?
+    ----------------------------------------
+    Agent 실행 성공과
+    실행 이력 저장 성공은 서로 다른 결과입니다.
+
+    예:
+
+        OpenAI intent 분류 성공
+
+        PyTorch prediction 성공
+
+        Evidence 생성 성공
+
+        Agent answer 생성 성공
+
+        SQLite 파일 권한 오류
+
+    이 상황에서 DB 저장 실패 때문에
+    이미 성공한 고장 예측 결과까지
+    HTTP 500으로 바꾸는 것은
+    Day 19 초기 정책에 맞지 않습니다.
+
+    따라서:
+
+        Agent 결과
+
+        -> 사용자에게 반환
+
+        Persistence 실패
+
+        -> warning과 서버 로그로 기록
+
+    정책을 사용합니다.
+
+
+    왜 Exception을 넓게 처리하는가?
+    ------------------------------
+    일반적으로는 가능한 구체적인 예외를
+    처리하는 것이 좋습니다.
+
+    하지만 이 helper는 FastAPI와 Persistence 사이의
+    최종 격리 경계입니다.
+
+    Persistence에서 다음 문제가 발생할 수 있습니다.
+
+        sqlite3.Error
+
+        파일 경로·권한 오류
+
+        JSON 직렬화 오류
+
+        필수 저장 필드 오류
+
+    Day 19 정책은 저장 계층의 오류가
+    Agent 응답을 실패시키지 않도록 하는 것입니다.
+
+    따라서 이 작은 Persistence 호출 범위에서만
+    Exception을 처리합니다.
+
+    오류를 완전히 숨기지는 않고
+    logger.exception()으로 traceback을 기록합니다.
+    """
+
+    try:
+        # final AgentState를 SQLite에 저장합니다.
+        #
+        # 기본 DB:
+        #
+        # data/runtime/
+        # agent_execution_history.db
+        insert_execution(
+            state=state,
+        )
+
+    except Exception:
+        # exception 정보와 traceback을
+        # 서버 로그에 기록합니다.
+        #
+        # 사용자 질문·설비 입력 전체는
+        # 개인정보·민감정보 위험 때문에
+        # 로그 메시지에 직접 넣지 않습니다.
+        logger.exception(
+            (
+                "Failed to save Agent "
+                "execution history. "
+                "trace_id=%s"
+            ),
+            state.get(
+                "trace_id"
+            ),
+        )
+
+        # Persistence 실패는 경고입니다.
+        #
+        # Agent workflow가 만든 prediction과 answer는
+        # 그대로 유지합니다.
+        append_warning(
+            state,
+            (
+                "Agent 실행 결과는 정상적으로 생성됐지만, "
+                "실행 이력을 SQLite에 저장하지 못했습니다."
+            ),
+        )
 
 def _raw_sample_to_dict(
     request: LangGraphAgentQueryRequest,
@@ -656,6 +827,64 @@ def query_langgraph_agent(
         chat_history=chat_history,
     )
 
+        # --------------------------------------------------------
+    # Day 19 - Agent 실행 이력 SQLite 저장
+    # --------------------------------------------------------
+    #
+    # LangGraph workflow가 완전히 끝난 final AgentState를
+    # Persistence 계층에 전달합니다.
+    #
+    # 이 시점에는 일반적으로 다음 값이 완성되어 있습니다.
+    #
+    #     trace_id
+    #
+    #     intent
+    #
+    #     prediction
+    #
+    #     probability
+    #
+    #     evidence
+    #
+    #     answer
+    #
+    #     trace_status
+    #
+    #     trace_duration_ms
+    #
+    #     trace_events
+    #
+    #
+    # 저장 책임을 LangGraph node 안에 넣지 않는 이유:
+    #
+    # LangGraph:
+    #
+    #     Agent workflow 실행
+    #
+    # Persistence:
+    #
+    #     실행 결과 저장·조회
+    #
+    # FastAPI:
+    #
+    #     두 계층 연결
+    #
+    # 역할을 분리하기 위해서입니다.
+    #
+    #
+    # 저장 실패 정책:
+    #
+    # SQLite 저장 실패
+    #
+    #     -> 서버 로그 기록
+    #
+    #     -> warning 추가
+    #
+    #     -> Agent response 유지
+    _save_execution_history_safely(
+        state=state,
+    )
+
     # LangGraph 내부 AgentState를
     # FastAPI response schema로 변환합니다.
     #
@@ -665,3 +894,190 @@ def query_langgraph_agent(
         question=request.question,
         state=state,
     )
+
+# ============================================================
+# Day 19 - Agent 실행 이력 조회 Endpoints
+# ============================================================
+
+
+@router.get(
+    "/agent/executions",
+    response_model=list[
+        AgentExecutionSummaryResponse
+    ],
+)
+def get_recent_agent_executions(
+    limit: int = Query(
+        default=20,
+        ge=1,
+        le=100,
+        description=(
+            "Maximum number of recent "
+            "Agent executions to return."
+        ),
+    ),
+) -> list[AgentExecutionSummaryResponse]:
+    """
+    최근 Agent 실행 이력을
+    최신 실행 순서로 조회합니다.
+
+    Endpoint:
+
+        GET /agent/executions
+
+    Query parameter:
+
+        limit
+
+    기본값:
+
+        20
+
+    허용 범위:
+
+        1 ~ 100
+
+    예:
+
+        GET /agent/executions
+
+        -> 최근 최대 20건
+
+        GET /agent/executions?limit=5
+
+        -> 최근 최대 5건
+
+
+    반환 데이터
+    -----------
+    목록 조회는 여러 실행을 반환하므로
+    핵심 요약 데이터만 포함합니다.
+
+    포함:
+
+        trace_id
+
+        question
+
+        intent
+
+        prediction
+
+        probability
+
+        risk_level
+
+        trace_status
+
+        fallback_occurred
+
+        trace_duration_ms
+
+        warning_count
+
+        error_count
+
+        created_at
+
+    제외:
+
+        raw_sample
+
+        evidence
+
+        trace_events
+
+        warnings 전체
+
+        errors 전체
+
+    전체 상세 데이터는:
+
+        GET /agent/executions/{trace_id}
+
+    endpoint에서 조회합니다.
+
+
+    limit 검증
+    ----------
+    FastAPI와 Pydantic이 Query 조건을 먼저 검증합니다.
+
+    ge=1:
+
+        1 이상
+
+    le=100:
+
+        100 이하
+
+    예:
+
+        limit=0
+
+        -> HTTP 422
+
+        limit=101
+
+        -> HTTP 422
+    """
+
+    executions = list_recent_executions(
+        limit=limit,
+    )
+
+    # Persistence 계층은 list[dict]를 반환합니다.
+    #
+    # FastAPI는 response_model을 사용해
+    # 각 dict를 AgentExecutionSummaryResponse에 맞게
+    # 자동 검증하고 JSON으로 변환합니다.
+    return executions
+
+# ============================================================
+# Day 19 - 상세 조회 Endpoints
+# ============================================================
+
+@router.get(
+    "/agent/executions/{trace_id}",
+    response_model=AgentExecutionDetailResponse,
+)
+def get_agent_execution_detail(
+    trace_id: str,
+) -> AgentExecutionDetailResponse:
+    """
+    trace_id를 사용하여
+    Agent 실행 이력 한 건을 상세 조회합니다.
+
+    조회 성공:
+
+        HTTP 200
+
+    실행 이력 없음:
+
+        HTTP 404
+    """
+
+    # Persistence 계층에서
+    # trace_id 기준 실행 이력을 조회합니다.
+    execution = get_execution_by_trace_id(
+        trace_id=trace_id,
+    )
+
+    # Persistence 계층은
+    # 실행 이력이 없을 때 None을 반환합니다.
+    #
+    # HTTP 상태 코드는 API 계층의 책임이므로
+    # 여기에서 404로 변환합니다.
+    if execution is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Agent execution history was not found. "
+                f"trace_id={trace_id}"
+            ),
+        )
+
+    # 조회 결과 dict는
+    # response_model을 통해
+    # AgentExecutionDetailResponse 구조로
+    # 검증된 뒤 JSON으로 반환됩니다.
+    return execution
