@@ -1559,7 +1559,9 @@ def validate_message_list_contains(
         failures=failures,
     )
 
-def run_schema_scenario() -> bool:
+def run_schema_scenario(
+    return_state: bool = False,
+) -> bool | AgentState:
     """
     Scenario 1을 실제로 실행합니다.
 
@@ -1703,6 +1705,17 @@ def run_schema_scenario() -> bool:
         "failure_count       : "
         "0"
     )
+
+    # 기존 Day 17 실행에서는 return_state 기본값이 False이므로
+    # 성공 여부인 True를 그대로 반환합니다.
+    #
+    # Day 18 Benchmark에서 return_state=True로 호출하면,
+    # 이미 실행과 검증이 끝난 최종 AgentState를 반환합니다.
+    #
+    # 이렇게 하면 Day 18이 OpenAI를 다시 호출하지 않고도
+    # intent, route, trace 등의 구조화 결과를 수집할 수 있습니다.
+    if return_state:
+        return state
 
     return True
 
@@ -3649,7 +3662,9 @@ def validate_api_prediction_response(
 
     return failures
 
-def run_prediction_scenario() -> bool:
+def run_prediction_scenario(
+    return_state: bool = False,
+) -> bool | AgentState:
     """
     Scenario 2를 실제로 실행합니다.
 
@@ -3857,6 +3872,17 @@ def run_prediction_scenario() -> bool:
         "failure_count       : "
         "0"
     )
+
+    # return_state=False:
+    #     기존 Day 17 실행 방식입니다.
+    #     시나리오 성공 여부인 True를 반환합니다.
+    #
+    # return_state=True:
+    #     Day 18 Benchmark에서 사용하는 방식입니다.
+    #     실제 OpenAI, LangGraph, PyTorch 실행과 검증이 모두 끝난
+    #     최종 AgentState를 반환합니다.
+    if return_state:
+        return state
 
     return True
 
@@ -4494,7 +4520,9 @@ def run_unknown_scenario() -> bool:
 
     return True
 
-def run_api_prediction_scenario() -> bool:
+def run_api_prediction_scenario(
+    return_response: bool = False,
+) -> bool | dict[str, Any]:
     """
     실제 FastAPI endpoint를 통한
     OpenAI + LangGraph + PyTorch E2E를 실행합니다.
@@ -4736,6 +4764,16 @@ def run_api_prediction_scenario() -> bool:
         "failure_count       : "
         "0"
     )
+
+    # return_response=False:
+    #     기존 Day 17 동작을 유지하여 True를 반환합니다.
+    #
+    # return_response=True:
+    #     Day 18 Benchmark가 이미 검증된 FastAPI JSON 응답에서
+    #     intent, route, trace 등의 품질 지표를 수집할 수 있도록
+    #     response_json 전체를 반환합니다.
+    if return_response:
+        return response_json
 
     return True
 
