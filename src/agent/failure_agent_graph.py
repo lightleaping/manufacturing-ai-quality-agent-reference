@@ -190,6 +190,31 @@ from src.agent.trace import (
     run_traced_route,
 )
 
+# Day 20
+# -------
+# Dataset Schema 정보를 LangGraph node 안에서
+# 직접 다시 작성하지 않고,
+# 공통 Application Service에서 가져옵니다.
+#
+# 이 Service는 이후 MCP Tool에서도 재사용합니다.
+#
+# 구조:
+#
+# LangGraph node
+#     ↓
+#
+# build_ai4i_dataset_schema_agent_result()
+#     ↓
+#
+# 기존 AI4I schema 상수
+#
+#
+# 이렇게 하면 LangGraph와 MCP가
+# 동일한 feature·target·evidence 기준을 사용합니다.
+from src.services.dataset_schema_service import (
+    build_ai4i_dataset_schema_agent_result,
+)
+
 
 def validate_question_node(state: AgentState) -> AgentState:
     """
@@ -448,66 +473,169 @@ def call_failure_prediction_node(state: AgentState) -> AgentState:
     return state
 
 
-def build_dataset_schema_answer_node(state: AgentState) -> AgentState:
+def build_dataset_schema_answer_node(
+    state: AgentState,
+) -> AgentState:
     """
-    AI4I 데이터셋 schema 질문에 답하는 node입니다.
+    AI4I 데이터셋 schema 질문에 답하는 LangGraph node입니다.
 
-    현재 Day 13에서는 dataset_schema_query intent를
-    실제 DB나 문서 검색으로 처리하지 않고,
-    프로젝트에서 사용 중인 AI4I feature 정보를 정적으로 답변합니다.
+    Day 20 변경 전
+    -------------
+    이 node 안에서 다음 값을 직접 작성했습니다.
 
-    이후 확장 방향
+        Dataset 이름
+
+        feature 목록
+
+        target
+
+        제외 column
+
+        자연어 answer
+
+        evidence
+
+
+    문제점
+    ------
+    이후 MCP Tool에서도 같은 정보를 제공하려면
+    동일한 feature·target 정보를 다시 작성해야 합니다.
+
+    그러면:
+
+        LangGraph node
+
+        MCP Tool
+
+    두 위치에 같은 정보가 중복됩니다.
+
+
+    Day 20 변경 후
+    -------------
+    Dataset Schema 생성 책임을
+    공통 Application Service로 이동했습니다.
+
+    현재 node는:
+
+        Service 호출
+
+        ↓
+
+        answer 수신
+
+        ↓
+
+        evidence 수신
+
+        ↓
+
+        AgentState 저장
+
+    역할만 담당합니다.
+
+
+    전체 실행 흐름
     --------------
-    - docs/ 문서 검색
-    - RAG 연결
-    - dataset metadata artifact 로딩
+    dataset_schema_query
+
+        ↓
+
+    build_dataset_schema_answer_node()
+
+        ↓
+
+    build_ai4i_dataset_schema_agent_result()
+
+        ↓
+
+    get_ai4i_dataset_schema()
+
+        ↓
+
+    src/data/schemas.py의 기존 상수
+
+        ↓
+
+    answer + evidence 생성
+
+        ↓
+
+    AgentState에 저장
+
+
+    Parameters
+    ----------
+    state:
+        LangGraph workflow 전체에서 공유하는
+        현재 AgentState입니다.
+
+        이 node는 기존 state의:
+
+            question
+
+            intent
+
+            trace 정보
+
+        등을 유지하면서,
+
+            answer
+
+            evidence
+
+        만 Dataset Schema 결과로 갱신합니다.
+
+
+    Returns
+    -------
+    AgentState
+
+    answer와 evidence가 저장된
+    동일한 LangGraph state를 반환합니다.
+
+
+    왜 MCP 코드를 이 node에 넣지 않는가?
+    -----------------------------------
+    LangGraph node는 Agent workflow 처리 단계입니다.
+
+    MCP Server와 MCP Tool 등록은
+    별도의 protocol 계층 책임입니다.
+
+    따라서 이 node는 MCP SDK를 import하지 않고,
+    MCP와 함께 사용할 공통 Service만 호출합니다.
     """
 
-    state["answer"] = (
-        "현재 프로젝트는 AI4I 2020 Predictive Maintenance Dataset을 사용합니다.\n\n"
-        "모델 입력 feature는 다음 6개입니다.\n"
-        "- Air temperature [K]\n"
-        "- Process temperature [K]\n"
-        "- Rotational speed [rpm]\n"
-        "- Torque [Nm]\n"
-        "- Tool wear [min]\n"
-        "- Type\n\n"
-        "target은 Machine failure입니다.\n"
-        "UDI와 Product ID는 식별자이므로 학습 feature에서 제외합니다.\n"
-        "Type은 현재 L/M/H를 숫자로 mapping해 사용하며, 이후 one-hot encoding으로 개선할 수 있습니다."
+    # 공통 Dataset Schema Service를 호출합니다.
+    #
+    # 반환 구조:
+    #
+    # {
+    #     "answer": "...",
+    #     "evidence": [
+    #         {
+    #             ...
+    #         }
+    #     ],
+    # }
+    #
+    # 이 Service는 이후 MCP Tool에서도
+    # 동일하게 재사용합니다.
+    schema_result = (
+        build_ai4i_dataset_schema_agent_result()
     )
 
-    state["evidence"] = [
-        {
-            "evidence_id": "dataset_schema_001",
-            "evidence_type": "dataset_schema",
-            "source": "project_schema",
-            "title": "AI4I 데이터셋 schema",
-            "summary": "현재 모델은 AI4I feature 6개를 사용하고, Machine failure를 target으로 사용합니다.",
-            "feature": None,
-            "value": None,
-            "direction": None,
-            "contribution": None,
-            "importance": None,
-            "severity": "LOW",
-            "metadata": {
-                "features": [
-                    "Air temperature [K]",
-                    "Process temperature [K]",
-                    "Rotational speed [rpm]",
-                    "Torque [Nm]",
-                    "Tool wear [min]",
-                    "Type",
-                ],
-                "target": "Machine failure",
-                "excluded_columns": [
-                    "UDI",
-                    "Product ID",
-                ],
-            },
-        }
-    ]
+    # 사용자에게 보여줄 자연어 답변을
+    # LangGraph AgentState에 저장합니다.
+    state["answer"] = schema_result["answer"]
 
+    # 답변의 근거인 Dataset Schema evidence를
+    # AgentState에 저장합니다.
+    state["evidence"] = schema_result["evidence"]
+
+    # 기존 AgentState 객체를 반환합니다.
+    #
+    # question, intent, trace 관련 값은
+    # 그대로 유지됩니다.
     return state
 
 

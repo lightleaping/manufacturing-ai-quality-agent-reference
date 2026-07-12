@@ -13,3 +13,4 @@ shap==0.51.0
 httpx2
 openai
 langgraph
+mcp==1.28.1
