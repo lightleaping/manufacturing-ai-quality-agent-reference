@@ -1,21 +1,38 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
+from math import isfinite
 from typing import Any, Iterable
 
 from src.agent.evidence_builder import filter_evidence_by_type
 
 
-def _safe_float(value: Any, default: float = 0.0) -> float:
+def _safe_float(
+    value: Any,
+    default: float = 0.0,
+) -> float:
     """
     probability, threshold 같은 값을 안전하게 float로 바꿉니다.
+
+    숫자로 변환할 수 없는 값뿐 아니라
+    NaN, positive infinity, negative infinity도
+    사용자 답변에 그대로 노출하지 않습니다.
     """
     if value is None:
         return default
 
     try:
-        return float(value)
+        converted_value = float(value)
+
     except (TypeError, ValueError):
         return default
+
+    # float 변환에 성공해도 NaN이나 Infinity일 수 있습니다.
+    # 이런 값은 정상적인 probability나 threshold로
+    # 표시할 수 없으므로 기본값으로 바꿉니다.
+    if not isfinite(converted_value):
+        return default
+
+    return converted_value
 
 
 def _format_percent(value: float) -> str:

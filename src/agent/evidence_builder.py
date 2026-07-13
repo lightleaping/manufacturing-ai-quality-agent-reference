@@ -1,6 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from math import isfinite
 from typing import Any, Iterable, Literal
 
 
@@ -122,10 +123,33 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
     try:
-        return float(value)
+        converted_value = float(value)
     except (TypeError, ValueError):
         return default
 
+    if not isfinite(converted_value):
+        return default
+
+    return converted_value
+
+
+def _safe_int(
+    value: Any,
+    default: int = 0,
+) -> int:
+    """
+    prediction 값을 안전하게 int로 바꿉니다.
+
+    None, 잘못된 문자열, NaN, Infinity처럼
+    int로 변환할 수 없는 값은 기본값으로 대체합니다.
+    """
+    if value is None:
+        return default
+
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
 
 def _normalize_severity(value: Any) -> Severity:
     """
@@ -165,10 +189,10 @@ def _direction_to_korean(direction: str | None) -> str:
     """
     SHAP direction을 Agent 답변용 한국어 표현으로 바꿉니다.
     """
-    if direction == "positive":
+    if direction in {"positive", "increases_risk"}:
         return "모델의 고장 위험 logit을 높이는 방향"
 
-    if direction == "negative":
+    if direction in {"negative", "decreases_risk"}:
         return "모델의 고장 위험 logit을 낮추는 방향"
 
     return "모델의 고장 위험 logit에 거의 영향을 주지 않는 방향"
@@ -192,8 +216,8 @@ def build_prediction_summary_evidence(
     """
     probability = _safe_float(_safe_get(prediction_result, "probability"))
     threshold = _safe_float(_safe_get(prediction_result, "threshold"))
-    prediction = int(_safe_get(prediction_result, "prediction", 0))
-    risk_level = str(_safe_get(prediction_result, "risk_level", "UNKNOWN"))
+    prediction = _safe_int(_safe_get(prediction_result, "prediction", 0))
+    risk_level = _normalize_severity(_safe_get(prediction_result, "risk_level", "UNKNOWN"))
 
     summary = (
         f"모델은 고장 probability를 {probability:.4f}로 예측했고, "
@@ -362,7 +386,11 @@ def convert_shap_local_evidence(
                 value=value,
                 direction=str(direction),
                 contribution=contribution,
-                importance=_safe_float(global_importance),
+                importance=(
+                    None
+                    if global_importance is None
+                    else _safe_float(global_importance)
+                ),
                 severity="UNKNOWN",
                 metadata={
                     "reference_value": reference_value,

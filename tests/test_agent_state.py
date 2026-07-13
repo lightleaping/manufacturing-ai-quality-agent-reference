@@ -76,7 +76,6 @@ from src.agent.state import (
     append_warning,
     create_initial_agent_state,
     has_errors,
-    has_raw_sample,
 )
 
 
@@ -758,50 +757,3 @@ def test_has_errors_returns_true_when_errors_exist():
     )
 
     assert has_errors(state) is True
-
-
-def test_has_raw_sample_returns_true_when_valid_raw_sample_exists():
-    """
-    raw_sample이 dict이고 비어 있지 않으면 True를 반환해야 합니다.
-    """
-
-    raw_sample = {
-        "Air temperature [K]": 303.0,
-        "Process temperature [K]": 312.5,
-        "Rotational speed [rpm]": 1380.0,
-        "Torque [Nm]": 62.0,
-        "Tool wear [min]": 220.0,
-        "Type": "L",
-    }
-
-    state = create_initial_agent_state(
-        question="이 설비 조건이면 고장 위험이 높아?",
-        raw_sample=raw_sample,
-    )
-
-    assert has_raw_sample(state) is True
-
-
-def test_has_raw_sample_returns_false_when_raw_sample_missing():
-    """
-    raw_sample key가 없으면 False를 반환해야 합니다.
-    """
-
-    state = create_initial_agent_state(
-        question="이 설비 조건이면 고장 위험이 높아?"
-    )
-
-    assert has_raw_sample(state) is False
-
-
-def test_has_raw_sample_returns_false_when_raw_sample_is_empty_dict():
-    """
-    raw_sample이 빈 dict이면 실제 예측에 사용할 입력값이 없으므로 False를 반환해야 합니다.
-    """
-
-    state = create_initial_agent_state(
-        question="이 설비 조건이면 고장 위험이 높아?",
-        raw_sample={},
-    )
-
-    assert has_raw_sample(state) is False

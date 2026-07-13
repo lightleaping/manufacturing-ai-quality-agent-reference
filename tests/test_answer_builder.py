@@ -1,4 +1,4 @@
-from src.agent.answer_builder import build_agent_answer
+﻿from src.agent.answer_builder import build_agent_answer
 from src.agent.evidence_builder import build_agent_evidence
 
 
@@ -68,3 +68,32 @@ def test_build_agent_answer_separates_rule_and_shap_evidence() -> None:
     # 잘못된 단정 표현이 들어가지 않도록 확인합니다.
     assert "때문에 고장" not in answer
     assert "원인입니다" not in answer
+
+
+def test_build_agent_answer_does_not_render_nan_probability() -> None:
+    """
+    probability가 NaN이어도
+    사용자 답변에 'nan'이나 'nan%'가 그대로 표시되면 안 됩니다.
+
+    정상 Prediction Service에서는 유효한 확률을 반환하지만,
+    Answer Builder는 다른 코드에서도 직접 호출될 수 있으므로
+    비정상 숫자를 방어적으로 처리합니다.
+    """
+
+    prediction_result = {
+        "probability": float("nan"),
+        "threshold": 0.7,
+        "prediction": 0,
+        "risk_level": "UNKNOWN",
+        "recommended_action": None,
+        "evidence": [],
+    }
+
+    answer = build_agent_answer(
+        prediction_result=prediction_result,
+        evidence_items=[],
+    )
+
+    assert "nan" not in answer.lower()
+    assert "0.0000" in answer
+    assert "0.00%" in answer

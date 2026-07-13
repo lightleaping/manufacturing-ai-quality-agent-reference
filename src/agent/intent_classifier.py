@@ -1,4 +1,4 @@
-"""
+﻿"""
 Day 13 - OpenAI 기반 intent classifier
 
 이 파일의 역할
@@ -56,10 +56,10 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import asdict, dataclass
+from math import isfinite
 from typing import Any
 
 from src.agent.state import ChatMessage, ChatRole
-
 
 # 현재 Day 13에서 지원할 intent 목록입니다.
 #
@@ -797,7 +797,17 @@ def validate_intent_payload(
 
     confidence = _normalize_confidence(raw_confidence)
 
-    reason = str(raw_reason).strip()
+    # JSON Schema에서는 reason을 문자열로 제한하지만,
+    # 이 함수는 테스트나 다른 Python 코드에서
+    # 직접 호출될 수도 있습니다.
+    #
+    # 따라서 문자열일 때만 앞뒤 공백을 제거하고,
+    # None이나 다른 타입이면 빈 문자열로 처리한 뒤
+    # 아래 기본 설명을 사용합니다.
+    if isinstance(raw_reason, str):
+        reason = raw_reason.strip()
+    else:
+        reason = ""
 
     if not reason:
         reason = "분류 이유가 제공되지 않았습니다."
@@ -824,6 +834,14 @@ def _normalize_confidence(value: Any) -> float:
         confidence = float(value)
 
     except (TypeError, ValueError):
+        return 0.0
+
+    # NaN, positive infinity, negative infinity는
+    # 0.0~1.0 범위의 유효한 confidence로 사용할 수 없습니다.
+    #
+    # float() 변환 자체는 성공할 수 있으므로
+    # 범위 비교 전에 유한한 숫자인지 별도로 확인합니다.
+    if not isfinite(confidence):
         return 0.0
 
     if confidence < 0.0:

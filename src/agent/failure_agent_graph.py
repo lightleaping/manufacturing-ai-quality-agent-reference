@@ -182,7 +182,6 @@ from src.agent.state import (
     append_warning,
     create_initial_agent_state,
     has_errors,
-    has_raw_sample,
 )
 from src.agent.trace import (
     finalize_trace,
@@ -370,11 +369,20 @@ def classify_intent_node(state: AgentState) -> AgentState:
     # intent 자체는 fallback으로 얻었으므로
     # workflow를 계속 실행할 수 있습니다.
     if result.error is not None:
+        # classifier 내부 오류 문자열에는
+        # SDK 예외 메시지, 내부 endpoint, 요청 정보 등이
+        # 포함될 가능성이 있습니다.
+        #
+        # warnings는 최종 API response에 전달될 수 있으므로
+        # 내부 error 상세를 그대로 노출하지 않고,
+        # 사용자에게 필요한 fallback 발생 사실만 안내합니다.
         append_warning(
             state,
-            f"intent 분류 과정에서 fallback 또는 오류가 발생했습니다: {result.error}",
+            (
+                "OpenAI intent 분류에 실패하여 "
+                "rule-based fallback을 사용했습니다."
+            ),
         )
-
     return state
 
 
@@ -464,11 +472,62 @@ def call_failure_prediction_node(state: AgentState) -> AgentState:
     state["threshold"] = prediction_result.get("threshold")
     state["risk_level"] = prediction_result.get("risk_level")
     state["recommended_action"] = prediction_result.get("recommended_action")
-    state["answer"] = prediction_result.get("answer", "")
-    state["evidence"] = prediction_result.get("evidence", [])
-    state["warnings"] = prediction_result.get("warnings", [])
-    state["errors"] = prediction_result.get("errors", [])
-    state["limitations"] = prediction_result.get("limitations", [])
+    state["answer"] = prediction_result.get(
+        "answer",
+        "",
+    )
+
+    state["evidence"] = prediction_result.get(
+        "evidence",
+        [],
+    )
+
+    # 기존 workflow warning을 유지하면서
+    # prediction service에서 새로 반환한 warning을 뒤에 추가합니다.
+    #
+    # 예:
+    #
+    # 기존:
+    #     OpenAI intent 분류 실패 후
+    #     rule-based fallback 사용
+    #
+    # 새 warning:
+    #     SHAP local explanation 생략
+    #
+    # 최종:
+    #     두 warning 모두 유지
+    state.setdefault(
+        "warnings",
+        [],
+    ).extend(
+        prediction_result.get(
+            "warnings",
+            [],
+        )
+        or []
+    )
+
+    # 기존 AgentState error가 있다면 삭제하지 않고,
+    # prediction service가 반환한 error를 뒤에 누적합니다.
+    #
+    # 일반적인 정상 routing에서는
+    # 기존 error가 있는 상태로 prediction node에 진입하지 않지만,
+    # AgentState의 error 누적 정책을 일관되게 유지합니다.
+    state.setdefault(
+        "errors",
+        [],
+    ).extend(
+        prediction_result.get(
+            "errors",
+            [],
+        )
+        or []
+    )
+
+    state["limitations"] = prediction_result.get(
+        "limitations",
+        [],
+    )
 
     return state
 

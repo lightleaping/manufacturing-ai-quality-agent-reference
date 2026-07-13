@@ -145,6 +145,58 @@ def test_validate_intent_payload_handles_string_confidence():
     assert result.error is None
 
 
+def test_validate_intent_payload_replaces_none_reason_with_default_message():
+    """
+    reason이 None이면 문자열 "None"으로 저장하지 않고
+    안전한 기본 설명으로 바꿔야 합니다.
+
+    OpenAI JSON Schema는 reason을 문자열로 제한하지만,
+    validate_intent_payload()는 테스트나 다른 Python 코드에서
+    직접 호출될 수도 있으므로 방어적으로 처리합니다.
+    """
+
+    payload = {
+        "intent": "failure_prediction",
+        "confidence": 0.85,
+        "reason": None,
+    }
+
+    result = validate_intent_payload(
+        payload=payload,
+        source="test",
+    )
+
+    assert (
+        result.reason
+        ==
+        "분류 이유가 제공되지 않았습니다."
+    )
+
+
+def test_validate_intent_payload_normalizes_nan_confidence_to_zero():
+    """
+    confidence가 NaN이면 유효한 0.0~1.0 범위의
+    신뢰도 값으로 사용할 수 없으므로 0.0으로 정규화해야 합니다.
+
+    OpenAI JSON Schema에서는 정상적으로 NaN을 반환하지 않지만,
+    validate_intent_payload()는 다른 Python 코드에서도
+    직접 호출될 수 있으므로 비정상 숫자를 방어합니다.
+    """
+
+    payload = {
+        "intent": "failure_prediction",
+        "confidence": float("nan"),
+        "reason": "테스트 분류 결과입니다.",
+    }
+
+    result = validate_intent_payload(
+        payload=payload,
+        source="test",
+    )
+
+    assert result.confidence == 0.0
+
+
 def test_validate_intent_payload_handles_invalid_payload_type():
     """
     payload가 dict가 아니면 unknown으로 처리해야 합니다.

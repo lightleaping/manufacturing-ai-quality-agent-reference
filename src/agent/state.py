@@ -1230,16 +1230,3 @@ def has_errors(state: AgentState) -> bool:
     """
 
     return len(state.get("errors", [])) > 0
-
-
-def has_raw_sample(state: AgentState) -> bool:
-    """
-    failure_prediction을 수행할 raw_sample이 있는지 확인합니다.
-
-    intent가 failure_prediction이어도 raw_sample이 없으면
-    실제 모델 예측을 수행할 수 없습니다.
-    """
-
-    raw_sample = state.get("raw_sample")
-
-    return isinstance(raw_sample, dict) and len(raw_sample) > 0

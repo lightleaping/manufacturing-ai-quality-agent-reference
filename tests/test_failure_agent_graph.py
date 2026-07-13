@@ -1,4 +1,4 @@
-"""
+﻿"""
 Day 13 - LangGraph Failure Agent workflow 테스트
 
 이 테스트 파일의 역할
@@ -168,7 +168,20 @@ def test_classify_intent_node_adds_warning_when_classifier_has_error(monkeypatch
     assert result["intent"] == "failure_prediction"
     assert result["intent_source"] == "fallback"
     assert len(result["warnings"]) == 1
-    assert "mock_openai_error" in result["warnings"][0]
+
+    # API response로 전달될 수 있는 warning에는
+    # 내부 classifier error 상세를 그대로 노출하지 않습니다.
+    assert (
+        result["warnings"][0]
+        ==
+        "OpenAI intent 분류에 실패하여 "
+        "rule-based fallback을 사용했습니다."
+    )
+
+    assert (
+        "mock_openai_error"
+        not in result["warnings"][0]
+    )
 
 
 def test_route_after_validation_goes_to_classify_when_no_errors():
@@ -342,6 +355,159 @@ def test_call_failure_prediction_node_stores_prediction_result(monkeypatch):
     assert result["warnings"] == ["SHAP 계산은 테스트에서 생략되었습니다."]
     assert result["limitations"] == ["SHAP value는 실제 원인 단정이 아닙니다."]
     assert result["errors"] == []
+
+
+def test_call_failure_prediction_node_preserves_existing_warnings(
+    monkeypatch,
+):
+    """
+    prediction service 결과를 AgentState에 저장할 때
+    기존 workflow warning을 삭제하지 않고
+    prediction service warning을 뒤에 누적해야 합니다.
+
+    재현하려는 상황:
+        OpenAI intent 분류 실패
+
+        -> rule-based fallback 성공
+
+        -> intent fallback warning 추가
+
+        -> failure prediction 성공
+
+        -> prediction service warning 추가
+
+    기대 결과:
+        기존 intent warning과
+        prediction service warning이
+        모두 AgentState에 남아 있어야 합니다.
+    """
+
+    def fake_run_failure_prediction_service(
+        raw_sample,
+        include_shap=True,
+        include_global_importance=True,
+    ):
+        return {
+            "prediction": 1,
+            "probability": 0.9929,
+            "threshold": 0.7,
+            "risk_level": "HIGH",
+            "recommended_action": (
+                "고장 위험이 높습니다. "
+                "설비 점검을 권장합니다."
+            ),
+            "answer": "고장 위험이 높습니다.",
+            "evidence": [],
+            "warnings": [
+                "SHAP local explanation을 생략했습니다."
+            ],
+            "errors": [],
+            "limitations": [],
+        }
+
+    monkeypatch.setattr(
+        failure_agent_graph,
+        "_run_failure_prediction_service",
+        fake_run_failure_prediction_service,
+    )
+
+    state = create_initial_agent_state(
+        question="이 설비 조건이면 고장 위험이 높아?",
+        raw_sample={
+            "air_temperature": 303.0,
+            "process_temperature": 312.5,
+            "rotational_speed": 1380.0,
+            "torque": 62.0,
+            "tool_wear": 220.0,
+            "type": "L",
+        },
+    )
+
+    state["intent"] = "failure_prediction"
+
+    state["warnings"].append(
+        "OpenAI intent 분류 실패 후 "
+        "rule-based fallback을 사용했습니다."
+    )
+
+    result = call_failure_prediction_node(
+        state
+    )
+
+    assert result["warnings"] == [
+        (
+            "OpenAI intent 분류 실패 후 "
+            "rule-based fallback을 사용했습니다."
+        ),
+        "SHAP local explanation을 생략했습니다.",
+    ]
+
+
+def test_call_failure_prediction_node_preserves_existing_errors(
+    monkeypatch,
+):
+    """
+    prediction service 결과를 AgentState에 저장할 때
+    기존 workflow error를 삭제하지 않고
+    prediction service error를 뒤에 누적해야 합니다.
+    """
+
+    def fake_run_failure_prediction_service(
+        raw_sample,
+        include_shap=True,
+        include_global_importance=True,
+    ):
+        return {
+            "prediction": None,
+            "probability": None,
+            "threshold": 0.7,
+            "risk_level": "UNKNOWN",
+            "recommended_action": (
+                "입력과 실행 상태를 확인해주세요."
+            ),
+            "answer": (
+                "고장 위험 예측 결과를 생성하지 못했습니다."
+            ),
+            "evidence": [],
+            "warnings": [],
+            "errors": [
+                "prediction service에서 새 오류가 발생했습니다."
+            ],
+            "limitations": [],
+        }
+
+    monkeypatch.setattr(
+        failure_agent_graph,
+        "_run_failure_prediction_service",
+        fake_run_failure_prediction_service,
+    )
+
+    state = create_initial_agent_state(
+        question="이 설비의 고장 위험을 알려줘.",
+        raw_sample={
+            "air_temperature": 303.0,
+            "process_temperature": 312.5,
+            "rotational_speed": 1380.0,
+            "torque": 62.0,
+            "tool_wear": 220.0,
+            "type": "L",
+        },
+    )
+
+    state["intent"] = "failure_prediction"
+
+    state["errors"].append(
+        "기존 workflow 오류입니다."
+    )
+
+    result = call_failure_prediction_node(
+        state
+    )
+
+    assert result["errors"] == [
+        "기존 workflow 오류입니다.",
+        "prediction service에서 새 오류가 발생했습니다.",
+    ]
 
 
 def test_call_failure_prediction_node_adds_error_when_service_raises(monkeypatch):

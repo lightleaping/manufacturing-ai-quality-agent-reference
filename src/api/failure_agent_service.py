@@ -63,54 +63,6 @@ from src.interpretability.shap_runtime import (
 )
 
 
-def request_to_raw_sample(
-    request: FailurePredictionRequest,
-) -> dict[str, Any]:
-    """
-    API request schema를 Day 5 inference pipeline이 이해하는 raw_sample로 변환한다.
-
-    왜 변환이 필요한가?
-    -------------------
-    API JSON에서는 사용하기 쉬운 snake_case 필드명을 쓴다.
-
-    예:
-        air_temperature
-        process_temperature
-        rotational_speed
-        torque
-        tool_wear
-        type
-
-    하지만 Day 5 inference pipeline은 AI4I 원본 컬럼명에 가까운 key를 사용한다.
-
-    예:
-        "Air temperature [K]"
-        "Process temperature [K]"
-        "Rotational speed [rpm]"
-        "Torque [Nm]"
-        "Tool wear [min]"
-        "Type"
-
-    따라서 API request를 모델 입력용 raw_sample로 바꿔줘야 한다.
-
-    주의
-    ----
-    Pydantic 모델 내부에서는 JSON의 "type" 필드가
-    machine_type 같은 이름으로 alias 처리되어 있을 가능성이 높다.
-
-    그래서 request.type이 아니라 request.machine_type을 사용한다.
-    Day 11에서 이 부분 때문에 AttributeError가 발생했었다.
-    """
-    return {
-        "Air temperature [K]": request.air_temperature,
-        "Process temperature [K]": request.process_temperature,
-        "Rotational speed [rpm]": request.rotational_speed,
-        "Torque [Nm]": request.torque,
-        "Tool wear [min]": request.tool_wear,
-        "Type": request.machine_type,
-    }
-
-
 def _to_dict(value: Any) -> Any:
     """
     dataclass, Pydantic model, dict를 response에 넣기 쉬운 dict로 바꾼다.
@@ -380,7 +332,7 @@ def run_failure_prediction_agent(
         "global_importance는 전체 test set 기준 모델 민감도이며 개별 sample의 직접 원인이 아닙니다.",
     ]
 
-    raw_sample = request_to_raw_sample(request)
+    raw_sample = request.to_raw_sample()
 
     try:
         model_artifacts = get_cached_failure_model_artifacts()
