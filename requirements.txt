@@ -14,3 +14,4 @@ httpx2
 openai
 langgraph
 mcp==1.28.1
+streamlit==1.59.1

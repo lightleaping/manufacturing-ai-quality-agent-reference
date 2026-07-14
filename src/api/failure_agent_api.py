@@ -26,7 +26,13 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from src.api.failure_agent_service import run_failure_prediction_agent
-from src.api.schemas import FailurePredictionRequest, FailurePredictionResponse
+from src.api.failure_explanation_service import generate_failure_prediction_explanation
+from src.api.schemas import (
+    FailurePredictionExplanationRequest,
+    FailurePredictionExplanationResponse,
+    FailurePredictionRequest,
+    FailurePredictionResponse,
+)
 
 
 router = APIRouter(
@@ -70,3 +76,28 @@ def predict_failure_agent(
     대신 service 함수에 위임한다.
     """
     return run_failure_prediction_agent(request)
+
+
+@router.post(
+    "/failure-prediction/explanation",
+    response_model=FailurePredictionExplanationResponse,
+)
+def explain_failure_prediction(
+    request: FailurePredictionExplanationRequest,
+) -> FailurePredictionExplanationResponse:
+    """
+    ?? ??? Failure Prediction ???
+    OpenAI ?? ?? ??? ?????.
+
+    ? Endpoint? Prediction? ?? ???? ????.
+
+    OpenAI ?? ??? HTTP ???
+    ?? Prediction ??? ????? ????.
+
+    ?? Response? error ???
+    ?? ?? ?? ??? ?????.
+    """
+
+    return generate_failure_prediction_explanation(
+        request,
+    )

@@ -855,3 +855,101 @@ def test_load_dashboard_api_config_rejects_invalid_timeout(
         ValueError,
     ):
         load_dashboard_api_config()
+
+def test_generate_failure_prediction_explanation_returns_response_json() -> None:
+    """
+    OpenAI 운영 해설 Client가
+    올바른 Endpoint와 JSON Body를 사용하는지 검증합니다.
+    """
+
+    prediction_result = {
+        "prediction": 1,
+        "probability": 0.9929,
+        "threshold": 0.7,
+        "risk_level": "HIGH",
+        "recommended_action": (
+            "설비 점검을 권장합니다."
+        ),
+        "evidence": [],
+        "answer": (
+            "고장 위험이 높게 예측되었습니다."
+        ),
+        "warnings": [],
+        "limitations": [],
+    }
+
+    request_payload = {
+        "prediction_result": (
+            prediction_result
+        )
+    }
+
+    expected_response = {
+        "summary": (
+            "현재 고장 위험이 높게 예측되었습니다."
+        ),
+        "key_signals": [
+            "공구 마모 신호를 확인하세요."
+        ],
+        "recommended_checks": [
+            "공구 상태를 점검하세요."
+        ],
+        "caution": (
+            "SHAP는 실제 원인을 확정하지 않습니다."
+        ),
+        "source": "openai",
+        "model": "test-model",
+        "error": None,
+    }
+
+    def handler(
+        request: httpx.Request,
+    ) -> httpx.Response:
+        assert (
+            request.method
+            == "POST"
+        )
+
+        assert (
+            request.url.path
+            == (
+                "/agent/failure-prediction/"
+                "explanation"
+            )
+        )
+
+        actual_json = json.loads(
+            request.content.decode(
+                "utf-8",
+            )
+        )
+
+        assert (
+            actual_json
+            == request_payload
+        )
+
+        return httpx.Response(
+            status_code=200,
+            json=expected_response,
+        )
+
+    transport = httpx.MockTransport(
+        handler,
+    )
+
+    with DashboardApiClient(
+        config=build_test_config(),
+        transport=transport,
+    ) as api_client:
+        actual_response = (
+            api_client
+            .generate_failure_prediction_explanation(
+                request_payload,
+            )
+        )
+
+    assert (
+        actual_response
+        == expected_response
+    )

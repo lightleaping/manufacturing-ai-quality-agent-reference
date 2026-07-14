@@ -41,6 +41,11 @@ FAILURE_PREDICTION_ENDPOINT = (
     "/agent/failure-prediction"
 )
 
+
+FAILURE_PREDICTION_EXPLANATION_ENDPOINT = (
+    "/agent/failure-prediction/explanation"
+)
+
 LANGGRAPH_AGENT_QUERY_ENDPOINT = (
     "/agent/langgraph-query"
 )
@@ -472,6 +477,35 @@ class DashboardApiClient:
         response_payload = self._request_json(
             method="POST",
             endpoint=FAILURE_PREDICTION_ENDPOINT,
+            json_body=payload,
+            expected_type=dict,
+        )
+
+        return response_payload
+
+    def generate_failure_prediction_explanation(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        확정된 Failure Prediction 결과에 대한
+        OpenAI 운영 해설 API를 호출합니다.
+
+        Endpoint:
+
+            POST /agent/failure-prediction/explanation
+
+        중요:
+        - Prediction을 다시 실행하지 않습니다.
+        - 사용자가 해설 생성 버튼을 누를 때만 호출합니다.
+        - OpenAI 실패 정보는 Response의 error 필드로 전달됩니다.
+        """
+
+        response_payload = self._request_json(
+            method="POST",
+            endpoint=(
+                FAILURE_PREDICTION_EXPLANATION_ENDPOINT
+            ),
             json_body=payload,
             expected_type=dict,
         )

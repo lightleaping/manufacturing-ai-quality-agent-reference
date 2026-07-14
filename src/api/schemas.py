@@ -1400,3 +1400,48 @@ class AgentExecutionDetailResponse(
     limitations: list[str] = Field(
         default_factory=list
     )
+
+
+# ============================================================
+# Day 24 - OpenAI Operational Explanation API Schemas
+# ============================================================
+
+
+class FailurePredictionExplanationRequest(BaseModel):
+    """
+    Request schema for an optional OpenAI explanation.
+
+    The prediction is not executed again.
+    The already confirmed FailurePredictionResponse,
+    including its evidence, is passed to the explanation service.
+    """
+
+    prediction_result: FailurePredictionResponse
+
+
+class FailurePredictionExplanationResponse(BaseModel):
+    """
+    Response schema for the optional OpenAI explanation.
+
+    When error is None, the explanation was generated successfully.
+    When error contains text, the confirmed prediction remains valid
+    and only the additional explanation feature failed.
+    """
+
+    summary: str
+
+    key_signals: list[str] = Field(
+        default_factory=list
+    )
+
+    recommended_checks: list[str] = Field(
+        default_factory=list
+    )
+
+    caution: str
+
+    source: str = "openai"
+
+    model: str | None = None
+
+    error: str | None = None
