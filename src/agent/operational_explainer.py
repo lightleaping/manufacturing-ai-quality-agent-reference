@@ -664,12 +664,11 @@ def generate_operational_explanation_with_openai(
             )
         )
 
-    except Exception as exc:
+    except Exception:
         return _build_error_result(
             error=(
-                "OpenAI 운영 해설 생성 중 "
-                "오류가 발생했습니다. "
-                f"{type(exc).__name__}: {exc}"
+                "OpenAI 운영 해설을 "
+                "생성하지 못했습니다."
             ),
             model=model_name,
         )

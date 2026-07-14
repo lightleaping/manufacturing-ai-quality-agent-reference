@@ -301,8 +301,21 @@ def test_generate_operational_explanation_handles_invalid_json(
     )
 
     assert (
+        result.error
+        == (
+            "OpenAI 운영 해설을 "
+            "생성하지 못했습니다."
+        )
+    )
+
+    assert (
         "JSONDecodeError"
-        in result.error
+        not in result.error
+    )
+
+    assert (
+        "not-json"
+        not in result.error
     )
 
 
