@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="470" viewBox="0 0 1200 470">
+<rect width="100%" height="100%" rx="28" fill="#F8FAFC"/>
+<style>.title{font:700 30px Arial,"Noto Sans KR",sans-serif;fill:#0F172A}.subtitle{font:400 17px Arial,"Noto Sans KR",sans-serif;fill:#475569}.head{font:700 18px Arial,"Noto Sans KR",sans-serif;fill:#FFFFFF}.body{font:600 16px Arial,"Noto Sans KR",sans-serif;fill:#0F172A}.small{font:400 14px Arial,"Noto Sans KR",sans-serif;fill:#475569}</style>
+<text x="50" y="52" class="title">AI4I 기반 설비 고장 예측</text>
+<text x="50" y="82" class="subtitle">Intent·Prediction·Evidence·Trace의 책임을 분리한 제조 AI 서비스</text>
+<rect x="50.0" y="120" width="252.5" height="290" rx="18" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="2"/>
+<rect x="50.0" y="120" width="252.5" height="54" rx="18" fill="#2563EB"/>
+<rect x="50.0" y="155" width="252.5" height="19" fill="#2563EB"/>
+<text x="70.0" y="153" class="head">INPUT &amp; INTENT</text>
+<text x="70.0" y="208" class="body">질문 + 설비 입력</text>
+<text x="70.0" y="243" class="small">OpenAI Intent JSON</text>
+<text x="70.0" y="271" class="small">Pydantic Validation</text>
+<text x="70.0" y="299" class="small">Rule Fallback</text>
+<path d="M 307.5 270 L 327.5 270" stroke="#475569" stroke-width="3"/>
+<path d="M 319.5 263 L 327.5 270 L 319.5 277" fill="none" stroke="#475569" stroke-width="3"/>
+<rect x="332.5" y="120" width="252.5" height="290" rx="18" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="2"/>
+<rect x="332.5" y="120" width="252.5" height="54" rx="18" fill="#0F766E"/>
+<rect x="332.5" y="155" width="252.5" height="19" fill="#0F766E"/>
+<text x="352.5" y="153" class="head">PREDICTION</text>
+<text x="352.5" y="208" class="body">고장 위험 예측</text>
+<text x="352.5" y="243" class="small">AI4I 6 Features</text>
+<text x="352.5" y="271" class="small">StandardScaler</text>
+<text x="352.5" y="299" class="small">PyTorch MLP · T=0.70</text>
+<path d="M 590.0 270 L 610.0 270" stroke="#475569" stroke-width="3"/>
+<path d="M 602.0 263 L 610.0 270 L 602.0 277" fill="none" stroke="#475569" stroke-width="3"/>
+<rect x="615.0" y="120" width="252.5" height="290" rx="18" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="2"/>
+<rect x="615.0" y="120" width="252.5" height="54" rx="18" fill="#0F172A"/>
+<rect x="615.0" y="155" width="252.5" height="19" fill="#0F172A"/>
+<text x="635.0" y="153" class="head">EVIDENCE</text>
+<text x="635.0" y="208" class="body">판단 근거</text>
+<text x="635.0" y="243" class="small">Prediction Summary</text>
+<text x="635.0" y="271" class="small">Rule · SHAP Local</text>
+<text x="635.0" y="299" class="small">Global Importance</text>
+<path d="M 872.5 270 L 892.5 270" stroke="#475569" stroke-width="3"/>
+<path d="M 884.5 263 L 892.5 270 L 884.5 277" fill="none" stroke="#475569" stroke-width="3"/>
+<rect x="897.5" y="120" width="252.5" height="290" rx="18" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="2"/>
+<rect x="897.5" y="120" width="252.5" height="54" rx="18" fill="#D97706"/>
+<rect x="897.5" y="155" width="252.5" height="19" fill="#D97706"/>
+<text x="917.5" y="153" class="head">SERVICE &amp; TRACE</text>
+<text x="917.5" y="208" class="body">실행·이력 확인</text>
+<text x="917.5" y="243" class="small">LangGraph · FastAPI</text>
+<text x="917.5" y="271" class="small">SQLite History</text>
+<text x="917.5" y="299" class="small">Streamlit · 307 Tests</text>
+</svg>
