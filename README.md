@@ -1,104 +1,86 @@
-﻿# AI4I 기반 설비 고장 예측
+# AI4I 기반 설비 고장 예측
 
-**저장소 ID:** `manufacturing-ai-quality-agent-reference`
-
-> **AI4I 제조 설비 데이터로 고장 위험을 예측하고,
-> PyTorch Prediction을 Evidence·Trace·SQLite History와 함께 제공하는 제조 AI Agent**
+> AI4I 제조 설비 데이터를 이용해 고장 위험을 예측하고, PyTorch 모델의 Prediction을 Evidence, Agent Trace, SQLite History와 함께 제공하는 제조 AI 프로젝트입니다.
 
 <p>
-  <img src="https://img.shields.io/badge/Model-PyTorch%20MLP-EE4C2C?style=flat-square" alt="PyTorch MLP">
-  <img src="https://img.shields.io/badge/Agent-LangGraph-2563EB?style=flat-square" alt="LangGraph">
-  <img src="https://img.shields.io/badge/Explainability-SHAP-0F766E?style=flat-square" alt="SHAP">
-  <img src="https://img.shields.io/badge/Test-307%20passed-0A9EDC?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/Python-3.11-3561D8?style=flat-square&logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/PyTorch-MLP-21AFC4?style=flat-square&logo=pytorch&logoColor=white" alt="PyTorch MLP">
+  <img src="https://img.shields.io/badge/LangGraph-Agent-151F32?style=flat-square" alt="LangGraph Agent">
+  <img src="https://img.shields.io/badge/FastAPI-Service-3561D8?style=flat-square&logo=fastapi&logoColor=white" alt="FastAPI">
+  <img src="https://img.shields.io/badge/Tests-307%20passed-21AFC4?style=flat-square" alt="Tests">
 </p>
-
-<p align="center">
-  <img src="./docs/assets/quality-agent-architecture.svg" alt="AI4I 기반 설비 고장 예측 시스템 구성도" width="100%">
-</p>
-
-[Profile](https://github.com/lightleaping) · [Architecture](#4-system-architecture) · [Evaluation](#3-key-results--evaluation) · [Run](#11-how-to-run)
 
 ---
 
-## Recruiter Summary
+## Project Overview
 
-| 구분 | 내용 |
+| 항목 | 내용 |
 |---|---|
-| 기간 | **2026.05 ~ 2026.07** |
-| 형태 | 개인 프로젝트 · 1인 개발 |
-| 문제 | 고장 확률만 반환하는 모델은 판단 이유와 Agent 실행 과정을 확인하기 어려움 |
-| 목표 | 모델 예측·설명 근거·실행 이력을 하나의 제조 AI 서비스로 연결 |
-| 범위 | 데이터 분석 → MLP → Threshold → SHAP → LangGraph → FastAPI → SQLite → Streamlit |
-| 내 역할 | 기획·설계·모델 개발·Agent Workflow·API·Dashboard·평가·테스트·문서화 전반 |
-| 핵심 기술 | Python, PyTorch, LangGraph, OpenAI API, SHAP, FastAPI, MCP, SQLite, Streamlit |
+| **기간** | 2026.05–07 |
+| **형태** | 개인 프로젝트 |
+| **목표** | 고장 확률뿐 아니라 예측 근거, Agent 처리 경로, 실행 이력을 함께 확인할 수 있는 제조 AI 서비스 구현 |
+| **범위** | AI4I 데이터 분석, PyTorch MLP, 불균형 대응, Threshold 정책, SHAP, LangGraph, FastAPI, MCP, SQLite, Streamlit, 평가, 테스트, 문서화 |
+| **기술** | Python, PyTorch, scikit-learn, SHAP, LangGraph, OpenAI API, FastAPI, MCP, SQLite, Streamlit, pytest |
+| **대표 결과** | Recall 82.35%, F1 44.62%, Agent 평가 6/6 PASS, 전체 회귀 테스트 307 passed |
 
 ---
 
-## Problem → Action → Evaluation
+## Problem → Implementation → Result
 
-| Problem · 왜 필요한가 | Action · 어떻게 해결했는가 | Evaluation · 무엇으로 검증했는가 |
+| Problem | Implementation | Result |
 |---|---|---|
-| AI4I 데이터는 고장 Class가 약 3.4%로 불균형해 Accuracy만 보면 모델이 모든 입력을 정상으로 판단해도 높게 보일 수 있음 | `pos_weight`, StandardScaler, Threshold 비교를 적용 | Precision·Recall·F1·Confusion Matrix·FN |
-| 고장 확률만으로 HIGH·MEDIUM·LOW 판단의 이유를 설명하기 어려움 | Prediction·Rule·SHAP Evidence를 분리해 구조화 | Evidence schema·정합성 Test |
-| LLM이 수치와 결과까지 생성하면 모델 결과가 바뀌거나 근거 없는 답변이 생길 수 있음 | LLM은 Intent와 쉬운 설명, PyTorch는 Prediction, 정책은 Risk Level 담당 | 6/6 Agent 평가·실제 OpenAI E2E |
-| API 응답 이후 실행 과정을 재확인하기 어려움 | Trace Event와 실행 요약을 SQLite에 저장 | History API·재조회·Dashboard·회귀 테스트 |
+| 고장 Class가 약 3.4%로 적어 Accuracy만으로 모델을 평가하기 어려움 | StandardScaler, `pos_weight`, Threshold 비교 적용 | Baseline Recall 0%에서 대표 실험 Recall 82.35%로 개선 |
+| 고장 확률만으로는 판단 근거를 설명하기 어려움 | Prediction Summary, Rule Evidence, SHAP Local, Global Importance를 분리 | 예측 결과와 설명 정보를 구조화된 Evidence로 반환 |
+| LLM이 수치와 결과까지 생성하면 모델 결과가 변할 수 있음 | OpenAI는 Intent 분류, PyTorch는 고장 확률, 정책 Layer는 Risk Level 담당 | LLM과 모델의 책임을 분리한 Agent Workflow 구성 |
+| API 응답 이후 처리 경로를 다시 확인하기 어려움 | Trace Event와 실행 요약을 SQLite에 저장 | History API와 Dashboard에서 실행 이력 재조회 |
+| Dashboard가 모델 정책을 중복 구현하면 결과가 달라질 수 있음 | Streamlit을 FastAPI Client로 구성 | 모델, Threshold, Evidence 정책을 Backend에서 일관되게 관리 |
 
 ---
 
-## 1. Why This Project
+## System Overview
 
-제조 설비 고장 위험 예측은 단순한 확률 반환으로 끝나기 어렵습니다.
+```mermaid
+flowchart LR
+    U[User Question<br/>and Machine Input]
+    S[Streamlit]
+    A[FastAPI]
 
-- 데이터가 불균형하면 높은 Accuracy가 실제 고장 탐지 성능을 의미하지 않을 수 있음
-- 고장 위험이 높다는 결과에 어떤 입력 특성이 영향을 주었는지 확인할 필요가 있음
-- 자연어 질문, 모델 추론, 근거 생성, 답변 생성의 역할을 분리해야 함
-- 오류가 발생한 위치와 실행 결과를 다시 확인할 Trace가 필요함
-- Dashboard가 모델 정책을 중복 구현하지 않고 Backend 결과를 그대로 사용해야 함
+    I[OpenAI Intent<br/>Structured JSON]
+    L[LangGraph Workflow]
+    M[PyTorch MLP<br/>Failure Probability]
+    P[Threshold Policy<br/>Prediction and Risk]
+    E[Evidence<br/>Rule and SHAP]
+    T[Trace]
+    DB[(SQLite History)]
 
-핵심 원칙:
+    U --> S --> A
+    A --> I --> L
+    L --> M --> P --> E
+    E --> T --> DB
+    E --> A --> S
+    DB --> A
+```
 
-> **LLM은 Intent를 구조화된 JSON으로 분류하고,
-> 고장 확률과 Prediction은 PyTorch 모델이 계산하며,
-> 최종 답변은 검증된 Prediction과 Evidence를 기반으로 생성합니다.**
+| Layer | Responsibility |
+|---|---|
+| **OpenAI** | 자연어 질문을 구조화된 Intent JSON으로 분류 |
+| **LangGraph** | Workflow State와 Route 관리 |
+| **PyTorch MLP** | 고장 확률 계산 |
+| **Threshold Policy** | Prediction과 Risk Level 결정 |
+| **Evidence Layer** | Prediction Summary, Rule, SHAP 정보 생성 |
+| **FastAPI** | 입력 검증, 정책 실행, 응답 제공 |
+| **SQLite** | Trace와 실행 이력 저장 |
+| **Streamlit** | 사용자 입력과 결과 시각화 |
 
----
+### Core Design Principle
 
-## 2. Project Scope
-
-### Data & Model
-
-- AI4I 2020 Predictive Maintenance Dataset
-- 10,000 rows
-- Train 8,000 / Test 2,000
-- Input Feature 6개
-- PyTorch MLP: `6 → 32 → 1`, Dropout 0.2
-- `BCEWithLogitsLoss(pos_weight)`
-- StandardScaler
-- Threshold evaluation
-
-### Explainability
-
-- SHAP Local Explanation
-- Global Feature Importance
-- Rule-based Evidence
-- Prediction Summary
-
-### Agent & Service
-
-- OpenAI Intent Classification
-- Pydantic structured output validation
-- LangGraph Routing
-- FastAPI Agent·Prediction·Explanation API
-- MCP stdio Tool
-- Trace Event
-- SQLite Execution History
-- Streamlit 4-page Dashboard
+> LLM은 Intent를 구조화하고, 고장 확률은 PyTorch 모델이 계산하며, 최종 답변은 검증된 Prediction과 Evidence를 기반으로 생성합니다.
 
 ---
 
-## 3. Key Results & Evaluation
+## Key Results
 
-### 3.1 Model Experiment
+### Model Experiment
 
 AI4I Train Label 비율:
 
@@ -107,136 +89,42 @@ AI4I Train Label 비율:
 | Normal | 0.966125 |
 | Failure | 0.033875 |
 
-Baseline은 Accuracy 0.9660이었지만 실제 고장을 하나도 찾지 못했습니다.
-
 | Stage | Accuracy | Precision | Recall | F1 | FN | TP |
 |---|---:|---:|---:|---:|---:|---:|
-| Baseline · threshold 0.50 | 0.9660 | 0.0000 | 0.0000 | 0.0000 | 68 | 0 |
-| + `pos_weight` | 0.8725 | 0.1445 | 0.5588 | 0.2296 | 30 | 38 |
-| + Scaling · threshold 0.50 | 0.8730 | 0.2000 | **0.9118** | 0.3280 | **6** | 62 |
-| Scaling · threshold 0.70 | **0.9305** | 0.3060 | 0.8235 | **0.4462** | 12 | 56 |
+| Baseline, Threshold 0.50 | 0.9660 | 0.0000 | 0.0000 | 0.0000 | 68 | 0 |
+| `pos_weight` 적용 | 0.8725 | 0.1445 | 0.5588 | 0.2296 | 30 | 38 |
+| Scaling, Threshold 0.50 | 0.8730 | 0.2000 | 0.9118 | 0.3280 | 6 | 62 |
+| Scaling, Threshold 0.70 | **0.9305** | **0.3060** | **0.8235** | **0.4462** | **12** | **56** |
 
-> 위 표는 Day 4 대표 실험 기록입니다. 현재 저장 Artifact의 Threshold는 `0.70`이며, 학습 Seed가 완전히 고정되지 않은 버전에서는 재학습 결과가 달라질 수 있습니다.
+> 위 표는 대표 실험 기록입니다. 고장 누락을 줄이기 위해 Recall을 우선했으며, Precision과의 Trade-off를 함께 확인했습니다.
 
-### 3.2 Agent & System Verification
+### Agent and System Verification
 
-| Evaluation | Result |
+| Verification | Result |
 |---|---:|
-| Deterministic Agent Scenarios | **6 / 6 PASS** |
+| Deterministic Agent Scenarios | **6/6 PASS** |
 | Real OpenAI E2E Validation | **5 scenarios PASS** |
-| Repeated Real OpenAI Benchmark | **9 / 9 successful runs** |
+| Repeated OpenAI Benchmark | **9/9 successful runs** |
 | Benchmark Fallback Rate | **0.0** |
-| Project Regression Tests | **307 passed** |
+| Regression Tests | **307 passed** |
 | Streamlit Dashboard | **4 pages** |
 
-Repeated Benchmark는 `schema`, `prediction`, `api_prediction` 3개 시나리오를 각각 3회 실행해 Intent·Route·Trace Status·Fallback 여부를 검증했습니다.
-
 ---
 
-## 4. System Architecture
+## Prediction Flow
 
 ```mermaid
 flowchart LR
-    USER[User Question + Machine Input]
+    R[Raw AI4I Sample]
+    F[Feature Ordering]
+    S[StandardScaler]
+    M[FailureMLP]
+    G[Sigmoid]
+    P[Failure Probability]
+    T[Threshold 0.70]
+    O[Prediction<br/>Risk Level<br/>Action]
 
-    subgraph UI["Streamlit Dashboard"]
-        PAGE1[Failure Prediction]
-        PAGE2[Evidence]
-        PAGE3[Agent Query]
-        PAGE4[Execution History]
-        CLIENT[Dashboard API Client]
-    end
-
-    subgraph API["FastAPI"]
-        PRED_API[Prediction API]
-        EXPLAIN_API[Explanation API]
-        AGENT_API[LangGraph Agent API]
-        HISTORY_API[Execution History API]
-    end
-
-    subgraph AGENT["LangGraph Workflow"]
-        INTENT[OpenAI Intent<br/>Structured JSON]
-        VALIDATE[Pydantic Validation<br/>Fallback]
-        ROUTER[Route]
-        MODEL_NODE[Prediction Node]
-        EVIDENCE_NODE[Evidence Node]
-        ANSWER[Deterministic Answer]
-    end
-
-    subgraph MODEL["PyTorch Model Layer"]
-        PRE[Feature Ordering<br/>StandardScaler]
-        MLP[FailureMLP]
-        POLICY[Threshold · Risk Policy]
-    end
-
-    subgraph EVIDENCE["Evidence Layer"]
-        SUMMARY[Prediction Summary]
-        RULE[Rule Evidence]
-        SHAP[SHAP Local]
-        GLOBAL[Global Importance]
-    end
-
-    subgraph OBS["Persistence & Observability"]
-        TRACE[Trace Events]
-        DB[(SQLite<br/>Execution History)]
-        MCP[MCP stdio Tool]
-    end
-
-    USER --> CLIENT
-    CLIENT --> PRED_API
-    CLIENT --> EXPLAIN_API
-    CLIENT --> AGENT_API
-    CLIENT --> HISTORY_API
-
-    AGENT_API --> INTENT --> VALIDATE --> ROUTER
-    ROUTER --> MODEL_NODE --> PRE --> MLP --> POLICY
-    POLICY --> EVIDENCE_NODE
-    EVIDENCE_NODE --> SUMMARY
-    EVIDENCE_NODE --> RULE
-    EVIDENCE_NODE --> SHAP
-    EVIDENCE_NODE --> GLOBAL
-    EVIDENCE_NODE --> ANSWER
-    ANSWER --> TRACE --> DB
-    HISTORY_API --> DB
-    ROUTER --> MCP
-
-    classDef ui fill:#FFF7ED,stroke:#D97706,color:#0F172A;
-    classDef api fill:#ECFDF5,stroke:#0F766E,color:#0F172A;
-    classDef agent fill:#EFF6FF,stroke:#2563EB,color:#0F172A;
-    classDef model fill:#F5F3FF,stroke:#7C3AED,color:#0F172A;
-    classDef evidence fill:#F0FDFA,stroke:#0D9488,color:#0F172A;
-    classDef obs fill:#F8FAFC,stroke:#475569,color:#0F172A;
-
-    class PAGE1,PAGE2,PAGE3,PAGE4,CLIENT ui;
-    class PRED_API,EXPLAIN_API,AGENT_API,HISTORY_API api;
-    class INTENT,VALIDATE,ROUTER,MODEL_NODE,EVIDENCE_NODE,ANSWER agent;
-    class PRE,MLP,POLICY model;
-    class SUMMARY,RULE,SHAP,GLOBAL evidence;
-    class TRACE,DB,MCP obs;
-```
-
----
-
-## 5. Prediction Flow
-
-```mermaid
-flowchart LR
-    RAW[Raw AI4I Sample] --> FORMAT[Feature Format]
-    FORMAT --> ORDER[Training Feature Order]
-    ORDER --> SCALE[StandardScaler]
-    SCALE --> MLP[FailureMLP]
-    MLP --> SIGMOID[Sigmoid]
-    SIGMOID --> PROB[Failure Probability]
-    PROB --> THRESHOLD[Threshold Comparison]
-    THRESHOLD --> RESULT[Prediction · Risk Level · Action]
-
-    classDef data fill:#F8FAFC,stroke:#64748B,color:#0F172A;
-    classDef process fill:#EFF6FF,stroke:#2563EB,color:#0F172A;
-    classDef output fill:#ECFDF5,stroke:#0F766E,color:#0F172A;
-
-    class RAW data;
-    class FORMAT,ORDER,SCALE,MLP,SIGMOID,THRESHOLD process;
-    class PROB,RESULT output;
+    R --> F --> S --> M --> G --> P --> T --> O
 ```
 
 ### Input Features
@@ -248,18 +136,73 @@ flowchart LR
 5. Tool wear [min]
 6. Type
 
-### Current Artifact
+### Model Artifact
 
 | Item | Value |
-|---|---:|
-| Input dimension | 6 |
-| Hidden dimension | 32 |
+|---|---|
+| Input Dimension | 6 |
+| Hidden Dimension | 32 |
 | Dropout | 0.2 |
 | Threshold | 0.70 |
 
 ---
 
-## 6. Agent Workflow
+## Technical Details
+
+<details open>
+<summary><b>01 | Data and Model</b></summary>
+
+<br>
+
+### Dataset
+
+| 항목 | 내용 |
+|---|---|
+| Dataset | AI4I 2020 Predictive Maintenance Dataset |
+| Total | 10,000 rows |
+| Train | 8,000 |
+| Test | 2,000 |
+| Target | Machine failure |
+| Input | 6 Features |
+
+### Model
+
+```text
+6 Input Features
+→ Linear(6→32)
+→ ReLU
+→ Dropout(0.2)
+→ Linear(32→1)
+→ Raw Logit
+```
+
+- Loss: `BCEWithLogitsLoss(pos_weight)`
+- Scaling: `StandardScaler`
+- Output: Failure Probability
+- Policy Threshold: 0.70
+
+</details>
+
+<details>
+<summary><b>02 | Evidence</b></summary>
+
+<br>
+
+| Evidence | Content |
+|---|---|
+| **Prediction Summary** | Probability, Threshold, Prediction, Risk Level |
+| **Rule Evidence** | 입력 Feature와 고정 정책 조건 |
+| **SHAP Local** | 현재 입력에서 모델 출력에 상대적으로 기여한 Feature |
+| **Global Importance** | 전체 평가 데이터 기준 Feature 영향도 |
+
+> SHAP 값은 모델 계산 관점에서 입력 특성의 상대적 기여를 보여주며, 실제 물리적 고장 원인을 확정하지 않습니다.
+
+</details>
+
+<details>
+<summary><b>03 | Agent Workflow</b></summary>
+
+<br>
 
 ```mermaid
 sequenceDiagram
@@ -267,109 +210,137 @@ sequenceDiagram
     participant API as FastAPI
     participant OAI as OpenAI Intent
     participant LG as LangGraph
-    participant Model as PyTorch Model
+    participant Model as PyTorch MLP
     participant Ev as Evidence Builder
     participant DB as SQLite
 
-    User->>API: Question + optional machine input
+    User->>API: Question and optional machine input
     API->>OAI: Request structured intent JSON
-    OAI-->>API: intent · confidence · reason
-    API->>API: Pydantic + finite value validation
+    OAI-->>API: intent, confidence, reason
+    API->>API: Pydantic and finite-value validation
     API->>LG: Validated state
     LG->>Model: Predict failure risk
-    Model-->>LG: probability · prediction · risk_level
-    LG->>Ev: Build prediction/rule/SHAP evidence
+    Model-->>LG: probability, prediction, risk_level
+    LG->>Ev: Build evidence
     Ev-->>LG: structured evidence
     LG->>DB: Save trace and execution summary
-    LG-->>API: answer + evidence + trace_id
+    LG-->>API: answer, evidence, trace_id
     API-->>User: JSON response
 ```
 
-### Role Separation
+### Intent Processing
 
-| Component | Responsibility |
-|---|---|
-| OpenAI | Intent classification, optional easy-to-read explanation |
-| PyTorch MLP | Failure probability |
-| Threshold Policy | Prediction and Risk Level |
-| Rule / SHAP | Evidence |
-| LangGraph | Workflow state and routing |
-| FastAPI | Validation, business policy, response |
-| SQLite | Trace and execution history |
-| Streamlit | User interaction and result visualization |
+- OpenAI Structured Output
+- Pydantic Schema Validation
+- `isfinite` Check
+- Rule-based Fallback
+- Internal Error Message Protection
 
----
+</details>
 
-## 7. Evidence & Trace Design
+<details>
+<summary><b>04 | Trace and History</b></summary>
 
-### Evidence
+<br>
 
-| Evidence | Content |
-|---|---|
-| Prediction Summary | Probability·Threshold·Prediction·Risk Level |
-| Rule Evidence | Sensor input and fixed policy conditions |
-| SHAP Local | 현재 입력에서 모델 출력에 상대적으로 기여한 Feature |
-| Global Importance | 전체 평가 데이터 기준 Feature 영향도 |
+Trace에는 다음 정보를 기록합니다.
 
-> SHAP 값은 모델의 계산 관점에서 입력 특성의 상대적 기여를 보여주며, 실제 물리적 고장의 원인을 확정하지 않습니다.
-
-### Trace
-
-- Intent classification
-- Route selection
-- Model prediction
-- Evidence generation
-- Fallback status
-- Execution status
-- Error summary
+- Intent Classification
+- Route Selection
+- Model Prediction
+- Evidence Generation
+- Fallback Status
+- Execution Status
+- Error Summary
 - Duration
 - Trace ID
 
-Trace와 실행 요약을 SQLite에 저장해 API 응답 이후에도 다시 조회할 수 있도록 했습니다.
+실행 요약을 SQLite에 저장해 API 응답 이후에도 다시 조회할 수 있도록 구성했습니다.
 
----
+</details>
 
-## 8. Safety & Validation
+<details>
+<summary><b>05 | FastAPI, MCP, and Streamlit</b></summary>
 
-### LLM Output Validation
+<br>
 
-방어 대상:
-
-- 정의되지 않은 Intent
-- `NaN`·`inf` confidence
-- `reason=None`
-- Schema mismatch
-- OpenAI failure
-
-처리:
-
-- Pydantic schema validation
-- `isfinite` check
-- Default value
-- Rule-based fallback
-- 내부 오류 메시지 비노출
-
-### Multi-turn Safety
-
-이전 설비 입력을 자동 재사용하지 않습니다. 사용자가 명시적으로 입력하지 않은 이전 센서값이 새로운 설비의 Prediction에 섞이는 것을 방지합니다.
-
-### Dashboard Policy
-
-Streamlit은 Model·LangGraph·SQLite를 직접 실행하지 않고 `DashboardApiClient → FastAPI` 구조로 결과를 받습니다. Prediction·Threshold·Risk Level·Evidence 정책을 Backend 한 곳에서 유지합니다.
-
----
-
-## 9. API Overview
+### API Endpoints
 
 | Method | Endpoint | Role |
 |---|---|---|
 | POST | `/agent/failure-prediction` | 직접 고장 위험 예측 |
-| POST | `/agent/failure-prediction/explanation` | Prediction + Evidence |
-| POST | `/agent/langgraph-query` | Intent·Agent Workflow |
+| POST | `/agent/failure-prediction/explanation` | Prediction과 Evidence 반환 |
+| POST | `/agent/langgraph-query` | Intent와 Agent Workflow 실행 |
 | GET | `/agent/executions` | 실행 이력 목록 |
 | GET | `/agent/executions/{trace_id}` | Trace 상세 조회 |
 
-### Example Response
+### Streamlit Pages
+
+1. Failure Prediction
+2. Evidence
+3. Agent Query
+4. Execution History
+
+### MCP
+
+- stdio 방식 MCP Server
+- `get_dataset_schema` Tool 제공
+- Dataset Schema 조회 기능을 Agent Workflow와 분리
+
+</details>
+
+<details>
+<summary><b>06 | Validation and Safety</b></summary>
+
+<br>
+
+### LLM Output Validation
+
+다음 입력을 방어합니다.
+
+- 정의되지 않은 Intent
+- `NaN`, `inf` Confidence
+- `reason=None`
+- Schema Mismatch
+- OpenAI Failure
+
+### Multi-turn Safety
+
+이전 설비 입력을 자동 재사용하지 않습니다. 사용자가 명시하지 않은 이전 센서값이 새로운 설비 Prediction에 섞이는 것을 방지합니다.
+
+### Dashboard Policy
+
+Streamlit은 모델, LangGraph, SQLite를 직접 실행하지 않고 `DashboardApiClient → FastAPI` 구조로 결과를 받습니다.
+
+</details>
+
+<details>
+<summary><b>07 | Current Scope and Next Steps</b></summary>
+
+<br>
+
+### Current Scope
+
+- 공개 AI4I Dataset 기반 프로젝트
+- 6개 상태 Feature를 이용한 Tabular Classification
+- 순차 Window 기반 Time Series 예측 모델은 아님
+- SHAP는 모델 설명 도구이며 실제 고장 원인을 확정하지 않음
+- OpenAI E2E는 API와 Network 상태에 영향을 받을 수 있음
+
+### Next Steps
+
+1. Seed와 Artifact Version 완전 고정
+2. PR-AUC, ROC-AUC, Calibration 추가
+3. One-hot Encoding과 Feature 처리 비교
+4. Time-based Split 또는 실제 시계열 설비 데이터 적용
+5. Data Drift와 Model Drift 감지
+6. 인증, 권한, 모델 Registry, 운영 Monitoring 확장
+
+</details>
+
+---
+
+## API Response
 
 ```json
 {
@@ -389,39 +360,7 @@ Streamlit은 Model·LangGraph·SQLite를 직접 실행하지 않고 `DashboardAp
 
 ---
 
-## 10. Project Structure
-
-```text
-manufacturing-ai-quality-agent-reference/
-├── models/
-│   └── failure_mlp/
-│       ├── model.pt
-│       ├── scaler.joblib
-│       ├── metadata.json
-│       ├── shap_background.pt
-│       └── global_importance.json
-├── reports/
-│   ├── artifacts/
-│   └── day*_summary.md
-├── scripts/
-├── src/
-│   ├── agent/
-│   ├── api/
-│   ├── dashboard/
-│   ├── evidence/
-│   ├── mcp/
-│   ├── model/
-│   ├── persistence/
-│   └── trace/
-├── tests/
-├── README.md
-├── requirements.txt
-└── pytest.ini
-```
-
----
-
-## 11. How to Run
+## Run and Verify
 
 ### Setup
 
@@ -455,46 +394,59 @@ streamlit run .\src\dashboard\app.py
 python -m pytest .\tests -q
 ```
 
-Expected final project result:
+Expected result:
 
 ```text
 307 passed
 ```
 
-> 저장소의 실제 모듈 경로와 실행 명령이 변경된 경우 기존 `README`의 Day 25 실행 명령과 `scripts/`를 우선 확인하세요.
+---
+
+## Project Structure
+
+```text
+manufacturing-ai-quality-agent-reference/
+├── models/
+│   └── failure_mlp/
+│       ├── model.pt
+│       ├── scaler.joblib
+│       ├── metadata.json
+│       ├── shap_background.pt
+│       └── global_importance.json
+├── reports/
+│   ├── artifacts/
+│   └── day*_summary.md
+├── scripts/
+├── src/
+│   ├── agent/
+│   ├── api/
+│   ├── dashboard/
+│   ├── data/
+│   ├── evaluation/
+│   ├── inference/
+│   ├── interpretability/
+│   ├── mcp_server/
+│   ├── models/
+│   ├── persistence/
+│   ├── services/
+│   ├── training/
+│   └── utils/
+├── tests/
+├── README.md
+├── requirements.txt
+└── pytest.ini
+```
 
 ---
 
-## 12. Limitations & Next Steps
+## What This Project Demonstrates
 
-### Current Limitations
-
-- AI4I 공개 Dataset 기반으로 실제 설비 운영 데이터의 Drift를 반영하지 않음
-- `Type` Feature를 단순 숫자로 변환한 버전이며 One-hot Encoding 비교가 필요
-- PyTorch 학습 Seed가 완전히 고정되지 않은 버전에서는 재학습 결과가 달라질 수 있음
-- SHAP는 모델 설명 도구이며 실제 고장 원인을 확정하지 않음
-- OpenAI E2E는 API 비용과 네트워크 상태에 영향을 받음
-- 운영 배포의 인증·권한·모니터링·모델 Registry는 범위 밖
-
-### Next Steps
-
-1. Seed와 Artifact version을 완전 고정
-2. PR-AUC·ROC-AUC·Calibration 추가
-3. Time-based split 또는 실제 시계열 설비 데이터 적용
-4. Data Drift·Model Drift 감지
-5. Role-based access와 운영 모니터링
-6. 실제 MCP Client와 Tool 확장
-
----
-
-## 13. What This Project Demonstrates
-
-- 불균형 제조 데이터에서 Accuracy의 착시를 확인하고 Recall·F1·FN을 함께 보는 능력
-- PyTorch 모델과 LLM의 책임을 분리하는 설계 능력
-- Prediction을 SHAP·Rule Evidence로 구조화하는 능력
-- Agent의 실행 과정을 Trace와 SQLite History로 남기는 능력
-- 모델·API·Dashboard 정책을 Backend 중심으로 일관되게 유지하는 능력
-- 실제 OpenAI 호출, Agent 평가, 회귀 테스트로 시스템을 검증하는 능력
+- 불균형 제조 데이터에서 Accuracy의 한계를 확인하고 Recall, F1, False Negative를 함께 평가한 경험
+- PyTorch 모델과 LLM의 책임을 분리한 설계 경험
+- Prediction을 Rule과 SHAP Evidence로 구조화한 경험
+- Agent 처리 경로를 Trace와 SQLite History로 저장한 경험
+- 모델, API, Dashboard 정책을 Backend에서 일관되게 관리한 경험
+- 실제 OpenAI 호출, Agent 평가, 회귀 테스트를 통해 시스템을 검증한 경험
 
 ---
 
@@ -503,8 +455,3 @@ Expected final project result:
 - Developer: 김수진
 - GitHub: [github.com/lightleaping](https://github.com/lightleaping)
 - Email: workingskyroad@gmail.com
----
-
-## 개편 전 README 보존
-
-적용 스크립트는 교체 전 README를 `docs/archive/README_before_encell.md`와 시간별 백업 파일로 보존합니다. 기존의 긴 개발 기록이나 실행 설명은 삭제하지 않고 해당 문서에서 계속 확인할 수 있습니다.
